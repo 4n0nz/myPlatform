@@ -12,3 +12,4 @@ next-env.d.ts
 .claude
 CLAUDE.md
 AGENTS.md
+!.env.example

@@ -67,6 +67,40 @@ lib/
   firebase.ts
 ```
 
+## Installation
+
+### Prerequisites
+
+- **Node.js 20+** and npm
+- **ffmpeg** — for camera audio transcoding (`sudo apt install ffmpeg`)
+- **PM2** — process manager (the setup script installs it if missing)
+
+### Quick install (Linux server)
+
+```bash
+git clone https://github.com/4n0nz/myPlatform.git
+cd myPlatform
+cp .env.example .env.local      # then edit it (Firebase config + dev password)
+./setup.sh
+```
+
+`setup.sh` installs dependencies, downloads & configures **MediaMTX**, builds the app, and starts both `platform` (the Next.js app) and `mediamtx` under PM2. The app runs on `http://localhost:3000`.
+
+### Configuration — `.env.local`
+
+| Variable | Description |
+|---|---|
+| `NEXT_PUBLIC_DEV_PASSWORD` | Password for the dev access gate |
+| `NEXT_PUBLIC_FIREBASE_*` | Firebase web config (Firebase console → Project settings → your web app) |
+
+In the Firebase console: enable **Google** + **Email/Password** auth, create a **Firestore** database, and allow public read of the `config` collection so guests receive the stream source:
+
+```
+match /config/{doc} { allow read: if true; allow write: if request.auth != null; }
+```
+
+After editing `.env.local`: `npm run build && pm2 restart platform`.
+
 ## Development
 
 ```bash
@@ -74,14 +108,31 @@ npm install
 npm run dev        # http://localhost:3000
 ```
 
-Create `lib/firebase.ts` with your own Firebase project config.
-
 ## Build & run
 
 ```bash
 npm run build
 npm run start      # serves the production build (required for rewrites / synced playback)
 ```
+
+## Deployment — public HTTPS
+
+The app sits behind nginx (`:80 → :3000`) and is exposed publicly via a **Cloudflare Tunnel** (free HTTPS, no port-forwarding). HTTPS is required for the camera feature (`getUserMedia`).
+
+```bash
+# Route a hostname to the local app through your named tunnel:
+cloudflared tunnel route dns <tunnel> roshdynamics.example.com
+```
+
+```yaml
+# /etc/cloudflared/config.yml
+ingress:
+  - hostname: roshdynamics.example.com
+    service: http://localhost:3000
+  - service: http_status:404
+```
+
+Add your public hostname to **Firebase → Authentication → Settings → Authorized domains** so Google sign-in works on it. In `mediamtx.yml`, set `webrtcAdditionalHosts` to the media server's LAN IP.
 
 ## Notes
 
