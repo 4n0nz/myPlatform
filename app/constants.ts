@@ -1,4 +1,4 @@
-export const DEV_PASSWORD = '1q3e5t7u9o2w4r6y8i0p'
+export const DEV_PASSWORD = process.env.NEXT_PUBLIC_DEV_PASSWORD ?? ''
 
 export const ICONS = [
   '🤖','👾','💀','🦊','🐺','🦁','🐉','🔥','⚡','🎭',
