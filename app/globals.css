@@ -13,14 +13,15 @@
 html, body {
   margin: 0;
   padding: 0;
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
 body {
   background: var(--bg);
   color: var(--text);
   font-family: 'Courier New', monospace;
-  min-height: 100vh;
-  overflow-x: hidden;
 }
 
 ::-webkit-scrollbar {
