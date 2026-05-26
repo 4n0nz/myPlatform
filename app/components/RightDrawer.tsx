@@ -304,7 +304,7 @@ export default function RightDrawer({
                       <div className='flex items-center justify-between'>
                         <span className='text-[11px] text-[#00ff41]/65'>Timestamps chat</span>
                         <div
-                          onClick={() => { const v = !showTimestamps; setShowTimestamps(v); localStorage.setItem('ips_timestamps', String(v)) }}
+                          onClick={() => { const v = !showTimestamps; setShowTimestamps(v); localStorage.setItem('rd_timestamps', String(v)) }}
                           className='w-9 h-5 rounded-full transition-all cursor-pointer relative shrink-0'
                           style={{ background: showTimestamps ? '#00ff41' : 'rgba(0,255,65,0.12)', border: '1px solid rgba(0,255,65,0.35)' }}
                         >

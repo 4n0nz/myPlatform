@@ -162,7 +162,7 @@ export default function Home() {
   // ── Effects ───────────────────────────────────────────────────────────────
 
   useEffect(() => {
-    setShowTimestamps(localStorage.getItem('ips_timestamps') === 'true')
+    setShowTimestamps(localStorage.getItem('rd_timestamps') === 'true')
   }, [])
 
   // Stream source — live sync so every open client updates instantly (no reload needed)
@@ -355,7 +355,7 @@ export default function Home() {
   // Messages — cache then Firestore
   useEffect(() => {
     try {
-      const cached = localStorage.getItem('ips_messages')
+      const cached = localStorage.getItem('rd_messages')
       if (cached) setMessages(JSON.parse(cached))
     } catch {}
   }, [])
@@ -380,7 +380,7 @@ export default function Home() {
         const byId = new Map(prev.map(m => [m.id, m]))
         incoming.forEach(m => byId.set(m.id, m))
         const merged = Array.from(byId.values())
-        try { localStorage.setItem('ips_messages', JSON.stringify(merged)) } catch {}
+        try { localStorage.setItem('rd_messages', JSON.stringify(merged)) } catch {}
         return merged
       })
     }, err => console.error('messages listener:', err))
@@ -497,7 +497,7 @@ export default function Home() {
   const resetChat = async () => {
     resettingChat.current = true
     setMessages([])
-    try { localStorage.removeItem('ips_messages') } catch {}
+    try { localStorage.removeItem('rd_messages') } catch {}
     const snap = await getDocs(collection(db, 'messages'))
     const batch = writeBatch(db)
     snap.docs.forEach(d => batch.delete(d.ref))
