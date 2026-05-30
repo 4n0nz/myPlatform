@@ -1,4 +1,4 @@
-# RoshDynamics — 5th Gen Warfare Platform
+# RoshDynamics
 
 A self-hosted live-streaming platform with a synchronized watch-party experience: an admin drives the playback and every viewer stays in sync. Built with Next.js, Firebase, and a self-hosted media server.
 

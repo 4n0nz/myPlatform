@@ -1,0 +1,22 @@
+services:
+
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      MEDIAMTX_HOST: mediamtx
+    ports:
+      - "3000:3000"
+    depends_on:
+      - mediamtx
+
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    restart: unless-stopped
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro
+    ports:
+      - "8889:8889"       # WebRTC WHIP/WHEP (signaling HTTP)
+      - "8189:8189/udp"   # WebRTC media UDP
+      - "8189:8189/tcp"   # WebRTC media TCP
+      # 8888 (HLS) et 8554 (RTSP) restent internes — proxiés par Next.js
