@@ -174,6 +174,44 @@ After editing `.env.local`: `npm run build && pm2 restart platform`.
 
 ---
 
+## Docker
+
+### Prérequis
+- **Docker** et **Docker Compose** installés sur la machine hôte.
+- Un fichier `.env.local` valide à la racine du projet (les variables `NEXT_PUBLIC_*` sont inlinées au build).
+
+### Lancer
+
+```bash
+docker compose up --build -d
+```
+
+L'app est dispo sur `http://localhost:3000`. MediaMTX tourne en parallèle dans son propre container.
+
+### Services
+
+| Service | Image | Ports exposés |
+|---|---|---|
+| `app` | build local (Next.js) | `3000` |
+| `mediamtx` | `bluenviron/mediamtx:latest` | `8889` (WHIP/WHEP), `8189` UDP+TCP (WebRTC media) |
+
+HLS (`8888`) et RTSP (`8554`) restent internes — proxiés par les rewrites Next.js.
+
+### Arrêter / rebuild
+
+```bash
+docker compose down          # arrêter
+docker compose up --build -d # rebuild après un changement de code
+```
+
+### Variables d'environnement au runtime
+
+| Variable | Défaut | Description |
+|---|---|---|
+| `MEDIAMTX_HOST` | `127.0.0.1` | Hôte MediaMTX vu par Next.js (`mediamtx` en Docker Compose) |
+
+---
+
 ## Development
 
 ```bash
