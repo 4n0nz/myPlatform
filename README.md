@@ -8,134 +8,192 @@ Live: **https://roshdynamics.anonymous.wtf**
 
 ## Features
 
-- **Synced YouTube watch-party** — the admin controls play / pause / seek and all viewers follow in real time. Drop several YouTube links to build a **playlist** with previous / next (⏮ ⏭) controls, also synced.
-- **Multiple stream sources** (admin-configurable from the in-app menu):
+### Playback & Sync
+- **Synced YouTube watch-party** — the admin controls play / pause / seek and all viewers follow in real time.
+- **Playlist support** — drop several YouTube links for a playlist with ⏮ ⏭ controls, synced to all viewers.
+- **Multiple stream sources** (admin-configurable):
   - YouTube (single video or playlist)
   - Twitch / direct iframe URL
-  - **Device camera** broadcast over WebRTC (WHIP) → MediaMTX → HLS for viewers
-- **Picture-in-Picture** — the admin can overlay their camera on top of the YouTube video and **drag it anywhere**; the position is synced to all viewers.
-- **Live chat** with friend requests, crews, user roles (admin / vip / user), custom icon & color.
-- **Dev access gate** with an animated intro.
-- **Responsive** — resizable stream / chat split on desktop, stacked layout on tablet & phone.
-- **Social preview** — Open Graph / Twitter cards with a generated brand image.
+  - **Device camera** broadcast over WebRTC (WHIP) → MediaMTX → HLS
+
+### Picture-in-Picture
+- **Admin camera PiP** — overlay the admin camera on top of the YouTube video, draggable and **resizable** by the admin; position and size synced to all viewers.
+- **Viewer camera PiP** — any authenticated viewer can join the live with their own camera; their stream broadcasts via WebRTC (WHIP) and appears as a PiP for everyone.
+- **Admin controls all PiPs** — the admin can drag and resize every active PiP (admin + all viewer streams); positions and sizes are stored in Firestore and synced in real time.
+
+### Social & Chat
+- **Live chat** with real-time messages, friend requests, crews, and user roles (admin / vip / modo / user).
+- **Custom profile** — emoji icon, color, display name.
+- **Real-time viewer count** — presence tracking via Firestore (heartbeat every 30s, stale after 60s).
+
+### Admin Controls
+- **Stream source management** — set YouTube URL/playlist, Twitch channel, or camera mode from the in-app menu.
+- **Announcement bar** — configure cycling messages (title + subtitle format) with a customizable interval (1–30 min); messages animate letter-by-letter from the right edge of the screen.
+- **Chat moderation** — reset chat, change user roles.
+- **PiP management** — toggle, drag, resize all PiPs from the player.
+
+### UX
+- **Persistent audio preference** — remembers whether the viewer had sound enabled across page reloads.
+- **Animated letter intro** for announcement messages (letters fly in from the right with spin effect).
+- **YouTube chrome masked** for viewers (end cards, share buttons, "More videos" hidden via box-shadow overlay).
+- **Resizable chat panel** — drag the divider between stream and chat on desktop.
+- **Dev access gate** with animated intro sequence.
+- **Responsive** — stacked layout on mobile/tablet, resizable split on desktop.
+- **5 placeholder nav buttons** — square icon buttons in the navbar, ready to wire up.
+- **Left sidebar** — "Join the live" CTA: opens auth modal for guests, activates camera for logged-in viewers.
+
+### Social preview
+- Open Graph / Twitter cards with a generated brand image.
+
+---
 
 ## Tech stack
 
-- **Next.js 16** (App Router, `next start`)
-- **Firebase** — Authentication (Google + email/password) and Cloud Firestore (real-time chat, stream config, social graph)
-- **MediaMTX** — WebRTC (WHIP) ingest + HLS egress for the camera feed
-- **ffmpeg** — continuous Opus → AAC transcode so camera audio plays over HLS everywhere (incl. iOS/Safari)
-- **Cloudflare Tunnel** — public HTTPS without exposing the origin
-- **nginx + PM2** — reverse proxy and process management
-- **Tailwind CSS**
+| Layer | Tech |
+|---|---|
+| Frontend | Next.js 16 (App Router), Tailwind CSS |
+| Auth & DB | Firebase Auth (Google + email/password) + Cloud Firestore |
+| Media ingest | MediaMTX — WebRTC WHIP (admin + viewer cameras) + HLS egress |
+| Audio transcode | ffmpeg — Opus → AAC for iOS/Safari HLS compatibility |
+| Public HTTPS | Cloudflare Tunnel (no port-forwarding) |
+| Process mgmt | nginx (`:80 → :3000`) + PM2 |
+
+---
 
 ## Architecture
 
 ```
-Browser (admin)                      Browser (viewers)
+Browser (admin/viewer)               Browser (other viewers)
   |  WHIP (WebRTC, H.264)              |  HLS  (H.264 + AAC)
   v                                    ^
 MediaMTX  --(cam, H264/Opus)-->  ffmpeg  --(cam2, H264/AAC)-->  MediaMTX HLS
-  ^                                                                  |
-  |  Next.js rewrites: /mediamtx -> :8889 (WHIP), /cam2 -> :8888 (HLS)
+  |
+  |  Viewer streams: /mediamtx/viewer-{uid}/whip  (WHIP in)
+  |                  /mediamtx/viewer-{uid}/whep  (WHEP out)
   |
 Next.js app (:3000)  <--  nginx (:80)  <--  Cloudflare Tunnel  <--  Internet
         ^
-        |  Firestore: config/stream (source, playlist index, PiP), config/playback (sync)
+        |  Firestore:
+        |    config/stream     — source URL, type, playlist index, PiP position/size
+        |    config/playback   — play state, timestamp (sync)
+        |    config/announcements — cycling messages + interval
+        |    presence/{sessionId} — viewer count (heartbeat)
+        |    viewerStreams/{uid}  — active viewer cameras + position/size
+        |    messages/           — chat
+        |    users/              — profiles, roles, friends, crews
+        |    friendRequests/     — pending friend requests
+        |    crews/              — crew membership
 ```
 
-Playback state (current video, position, play/pause, PiP position) lives in Firestore and is streamed to clients via `onSnapshot`, which keeps every viewer in sync with the admin.
+---
 
 ## Project structure
 
 ```
 app/
-  page.tsx              # main orchestrator: auth, stream player, sync, PiP, playlist
+  page.tsx              # main orchestrator: auth, player, sync, PiP, presence, announcements
   layout.tsx            # metadata, Open Graph / Twitter cards
   opengraph-image.tsx   # generated social preview image
-  globals.css
+  globals.css           # global styles + keyframe animations
   components/
-    PasswordGate.tsx
-    IntroAnimation.tsx
-    AuthModal.tsx
-    LeftSidebar.tsx
-    ChatPanel.tsx
-    RightDrawer.tsx     # menu, friends, crews, admin source/PiP controls
+    PasswordGate.tsx    # dev access gate
+    IntroAnimation.tsx  # animated intro
+    AuthModal.tsx       # login / register modal
+    LeftSidebar.tsx     # "Join the live" CTA (guests → auth, viewers → camera)
+    ChatPanel.tsx       # live chat
+    RightDrawer.tsx     # menu, friends, crews, admin controls (source, PiP, announcements)
   types.ts
   constants.ts
 lib/
   firebase.ts
 ```
 
+---
+
+## Firestore rules
+
+```js
+rules_version =  2;
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Stream config: public read (guests need stream source)
+    match /config/{doc} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+    // Presence (viewer count): public read/write
+    match /presence/{sessionId} {
+      allow read, write, delete: if true;
+    }
+    // Viewer streams: public read, authenticated write
+    match /viewerStreams/{uid} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+    // Everything else: authenticated only
+    match /{document=**} {
+      allow read, write: if request.auth != null;
+    }
+  }
+}
+```
+
+---
+
 ## Installation
 
 ### Prerequisites
-
 - **Node.js 20+** and npm
-- **ffmpeg** — for camera audio transcoding (`sudo apt install ffmpeg`)
-- **PM2** — process manager (the setup script installs it if missing)
+- **ffmpeg** (`sudo apt install ffmpeg`)
+- **PM2** (installed by setup script if missing)
 
 ### Quick install (Linux server)
 
 ```bash
 git clone https://github.com/4n0nz/myPlatform.git
 cd myPlatform
-cp .env.example .env.local      # then edit it (Firebase config + dev password)
+cp .env.example .env.local   # fill in Firebase config + dev password
 ./setup.sh
 ```
 
-`setup.sh` installs dependencies, downloads & configures **MediaMTX**, builds the app, and starts both `platform` (the Next.js app) and `mediamtx` under PM2. The app runs on `http://localhost:3000`.
+`setup.sh` installs dependencies, downloads & configures MediaMTX, builds the app, and starts both `platform` and `mediamtx` under PM2.
 
-### Configuration — `.env.local`
+### `.env.local` variables
 
 | Variable | Description |
 |---|---|
 | `NEXT_PUBLIC_DEV_PASSWORD` | Password for the dev access gate |
-| `NEXT_PUBLIC_FIREBASE_*` | Firebase web config (Firebase console → Project settings → your web app) |
-
-In the Firebase console: enable **Google** + **Email/Password** auth, create a **Firestore** database, and allow public read of the `config` collection so guests receive the stream source:
-
-```
-match /config/{doc} { allow read: if true; allow write: if request.auth != null; }
-```
+| `NEXT_PUBLIC_FIREBASE_API_KEY` | Firebase web config |
+| `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN` | Firebase web config |
+| `NEXT_PUBLIC_FIREBASE_PROJECT_ID` | Firebase web config |
+| `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET` | Firebase web config |
+| `NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID` | Firebase web config |
+| `NEXT_PUBLIC_FIREBASE_APP_ID` | Firebase web config |
 
 After editing `.env.local`: `npm run build && pm2 restart platform`.
+
+---
 
 ## Development
 
 ```bash
 npm install
-npm run dev        # http://localhost:3000
+npm run dev    # http://localhost:3000
 ```
 
-## Build & run
+## Build & deploy
 
 ```bash
-npm run build
-npm run start      # serves the production build (required for rewrites / synced playback)
+npm run build && pm2 restart platform
 ```
 
-## Deployment — public HTTPS
-
-The app sits behind nginx (`:80 → :3000`) and is exposed publicly via a **Cloudflare Tunnel** (free HTTPS, no port-forwarding). HTTPS is required for the camera feature (`getUserMedia`).
-
-```bash
-# Route a hostname to the local app through your named tunnel:
-cloudflared tunnel route dns <tunnel> roshdynamics.example.com
-```
-
-```yaml
-# /etc/cloudflared/config.yml
-ingress:
-  - hostname: roshdynamics.example.com
-    service: http://localhost:3000
-  - service: http_status:404
-```
-
-Add your public hostname to **Firebase → Authentication → Settings → Authorized domains** so Google sign-in works on it. In `mediamtx.yml`, set `webrtcAdditionalHosts` to the media server's LAN IP.
+---
 
 ## Notes
 
-- Camera broadcasting requires a secure context (HTTPS), which the Cloudflare Tunnel provides.
-- Camera ingest works best when the broadcaster is on the same LAN as the media server (WebRTC media stays local; only signaling goes through the tunnel).
-- Firestore rules must allow public read of the `config` collection so guests can receive the stream source.
+- Camera broadcasting requires HTTPS (provided by Cloudflare Tunnel).
+- Camera ingest works best on LAN — WebRTC media stays local, only signaling goes through the tunnel.
+- Set `webrtcAdditionalHosts` in `mediamtx.yml` to the server LAN IP.
+- Add your public hostname to **Firebase → Authentication → Authorized domains**.
+- MediaMTX `all_others:` path allows viewer streams on dynamic paths (`viewer-{uid}`) without extra config.
+ENDOFREADME

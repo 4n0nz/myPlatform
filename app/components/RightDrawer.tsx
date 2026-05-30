@@ -7,7 +7,7 @@ import type {
   Crew, CrewMember, PublicCrew, AdminUser,
 } from '../types'
 
-type MenuSection = 'profil' | 'notifications' | 'parametres' | 'historique' | 'source'
+type MenuSection = 'profil' | 'notifications' | 'parametres' | 'historique' | 'source' | 'annonces'
 type RightTab = 'menu' | 'amis' | 'crew'
 
 type Props = {
@@ -69,6 +69,8 @@ type Props = {
   stopBroadcast: () => void
   pipEnabled: boolean
   togglePip: (on: boolean) => void
+  announcements: { messages: string[]; interval: number } | null
+  saveAnnouncements: (messages: string[], interval: number) => void
 }
 
 export default function RightDrawer({
@@ -84,8 +86,17 @@ export default function RightDrawer({
   streamUrl, streamTitle, streamType, saveStreamSource,
   broadcasting, startBroadcast, stopBroadcast,
   pipEnabled, togglePip,
+  announcements, saveAnnouncements,
 }: Props) {
   const [sourceUrlInput, setSourceUrlInput] = useState(streamUrl)
+  const [annMsgs, setAnnMsgs] = useState<string[]>(announcements?.messages ?? [])
+  const [annInterval, setAnnInterval] = useState(announcements?.interval ?? 300)
+  const [annInput, setAnnInput] = useState('')
+  // Sync local state when Firestore data arrives
+  useEffect(() => {
+    setAnnMsgs(announcements?.messages ?? [])
+    setAnnInterval(announcements?.interval ?? 5)
+  }, [announcements])
   const [sourceTitleInput, setSourceTitleInput] = useState(streamTitle)
   const [sourceType, setSourceType] = useState<'youtube' | 'camera'>(streamType)
   const isAdmin = userRole === 'admin' || user?.email === 'mikeclaudo@gmail.com'
@@ -446,6 +457,81 @@ export default function RightDrawer({
                     )}
                   </div>
                 )}
+
+                {/* ANNONCES */}
+                {menuSection === 'annonces' && (
+                  <div className='px-2 py-2 flex flex-col gap-3'>
+                    <div className='text-[9px] text-[#00ff41]/35 tracking-widest px-1'>MESSAGES DE LA BARRE</div>
+
+                    {/* Interval setting */}
+                    <div className='flex items-center gap-2 px-1'>
+                      <span className='text-[9px] text-[#00ff41]/50 tracking-widest shrink-0'>INTERVALLE</span>
+                      <input
+                        type='range' min={60} max={1800} step={60}
+                        value={annInterval}
+                        onChange={e => setAnnInterval(Number(e.target.value))}
+                        className='flex-1 accent-[#00ff41]'
+                      />
+                      <span className='text-[10px] text-[#00ff41]/70 w-10 text-right shrink-0'>{Math.round(annInterval / 60)}min</span>
+                    </div>
+
+                    {/* Message list */}
+                    <div className='flex flex-col gap-1 max-h-40 overflow-y-auto'>
+                      {annMsgs.length === 0 && (
+                        <p className='text-[10px] text-[#00ff41]/25 text-center py-3'>Aucun message</p>
+                      )}
+                      {annMsgs.map((msg, i) => (
+                        <div key={i} className='flex items-start gap-2 px-2 py-1.5 border border-[#00ff41]/15 bg-[#00ff41]/3'>
+                          <div className='flex-1 min-w-0'>
+                            <p className='text-[10px] text-[#00ff41]/80 font-bold leading-snug break-words'>{msg.split('\n')[0]}</p>
+                            {msg.includes('\n') && <p className='text-[9px] text-[#00ff41]/40 leading-snug break-words mt-0.5'>{msg.split('\n')[1]}</p>}
+                          </div>
+                          <button
+                            onClick={() => setAnnMsgs(prev => prev.filter((_, j) => j !== i))}
+                            className='text-[#ff4141]/50 hover:text-[#ff4141] text-[11px] shrink-0 mt-0.5'
+                          >✕</button>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Add message input */}
+                    <div className='flex gap-1'>
+                      <textarea
+                        rows={2}
+                        value={annInput}
+                        onChange={e => setAnnInput(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter' && !e.shiftKey && annInput.trim()) {
+                            e.preventDefault()
+                            setAnnMsgs(prev => [...prev, annInput.trim()])
+                            setAnnInput('')
+                          }
+                        }}
+                        placeholder='Titre (ligne 1)
+Sous-titre (ligne 2)'
+                        className='flex-1 bg-black border border-[#00ff41]/30 text-[#00ff41] text-[10px] px-2 py-1.5 outline-none focus:border-[#00ff41]/70 placeholder:text-[#00ff41]/25 resize-none'
+                      />
+                      <button
+                        onClick={() => { if (annInput.trim()) { setAnnMsgs(prev => [...prev, annInput.trim()]); setAnnInput('') } }}
+                        className='px-3 text-[11px] border border-[#00ff41]/40 text-[#00ff41]/60 hover:text-[#00ff41] hover:bg-[#00ff41]/10 transition-all'
+                      >+</button>
+                    </div>
+
+                    {/* Save button */}
+                    <button
+                      onClick={() => saveAnnouncements(annMsgs, annInterval)}
+                      className='w-full py-1.5 text-[9px] tracking-widest border border-[#00ff41]/50 text-[#00ff41]/70 hover:text-[#00ff41] hover:bg-[#00ff41]/10 transition-all'
+                    >✓ SAUVEGARDER</button>
+
+                    {/* Clear all */}
+                    {annMsgs.length > 0 && (
+                      <button
+                        onClick={() => { setAnnMsgs([]); saveAnnouncements([], annInterval) }}
+                        className='w-full py-1 text-[9px] tracking-widest text-[#ff4141]/40 hover:text-[#ff4141] transition-colors'
+                      >⌫ VIDER TOUT</button>
+                    )}
+                  </div>
+                )}
               </>
             ) : (
               /* Menu home */
@@ -484,6 +570,13 @@ export default function RightDrawer({
                       className='w-full mb-2 py-1.5 text-[9px] border border-[#00ff41]/30 text-[#00ff41]/55 hover:bg-[#00ff41]/8 hover:text-[#00ff41] transition-all tracking-widest flex items-center justify-between px-2'
                     >
                       <span>📡 SOURCE STREAM</span>
+                      <span className='text-[#00ff41]/25 text-[12px]'>›</span>
+                    </button>
+                    <button
+                      onClick={() => setMenuSection('annonces')}
+                      className='w-full mb-2 py-1.5 text-[9px] border border-[#00ff41]/30 text-[#00ff41]/55 hover:bg-[#00ff41]/8 hover:text-[#00ff41] transition-all tracking-widest flex items-center justify-between px-2'
+                    >
+                      <span>📢 ANNONCES / PUB</span>
                       <span className='text-[#00ff41]/25 text-[12px]'>›</span>
                     </button>
                     <button

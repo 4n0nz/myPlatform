@@ -4,13 +4,14 @@ import { LogIn, User, LogOut } from 'lucide-react'
 import {
   signOut,
   onAuthStateChanged,
+  onIdTokenChanged,
   updateProfile,
   type User as FirebaseUser,
 } from 'firebase/auth'
 import {
   collection, addDoc, query, orderBy, limit, onSnapshot,
   serverTimestamp, doc, getDoc, setDoc, getDocs, updateDoc,
-  where, arrayUnion, writeBatch,
+  where, arrayUnion, writeBatch, deleteDoc,
 } from 'firebase/firestore'
 import { auth, db } from '@/lib/firebase'
 
@@ -35,6 +36,50 @@ function getYouTubeIds(text: string): string[] {
   return ids
 }
 
+
+// ── ViewerStream: WHEP consumer for a single remote viewer camera ─────────────
+function ViewerStream({ uid, name }: { uid: string; name: string }) {
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+  const [ready, setReady] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    const pc = new RTCPeerConnection()
+    const stream = new MediaStream()
+    pc.addTransceiver('video', { direction: 'recvonly' })
+    pc.addTransceiver('audio', { direction: 'recvonly' })
+    pc.ontrack = e => stream.addTrack(e.track)
+    ;(async () => {
+      const offer = await pc.createOffer()
+      await pc.setLocalDescription(offer)
+      await new Promise<void>(res => {
+        if (pc.iceGatheringState === 'complete') { res(); return }
+        const fn = () => { if (pc.iceGatheringState === 'complete') { pc.removeEventListener('icegatheringstatechange', fn); res() } }
+        pc.addEventListener('icegatheringstatechange', fn)
+        setTimeout(res, 2000)
+      })
+      if (cancelled) { pc.close(); return }
+      const resp = await fetch(`/mediamtx/viewer-${uid}/whep`, {
+        method: 'POST', headers: { 'Content-Type': 'application/sdp' }, body: pc.localDescription!.sdp,
+      })
+      if (!resp.ok) { pc.close(); return }
+      await pc.setRemoteDescription({ type: 'answer', sdp: await resp.text() })
+      if (cancelled) { pc.close(); return }
+      if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play().catch(() => {}) }
+      setReady(true)
+    })()
+    return () => { cancelled = true; pc.close(); setReady(false) }
+  }, [uid])
+
+  return (
+    <div className='w-full h-full relative'>
+      <video ref={videoRef} autoPlay muted playsInline className='w-full h-full object-cover' style={{ opacity: ready ? 1 : 0, transition: 'opacity 0.3s' }} />
+      <div className='absolute bottom-0.5 left-1 right-1 text-[8px] text-[#00ff41]/60 tracking-widest pointer-events-none truncate'>{name}</div>
+      {!ready && <div className='absolute inset-0 flex items-center justify-center text-[8px] text-[#00ff41]/30 tracking-widest'>CONNEXION…</div>}
+    </div>
+  )
+}
+
 export default function Home() {
   // ── Auth & gate ──────────────────────────────────────────────────────────
   const [modal, setModal] = useState<'login' | 'register' | null>(null)
@@ -44,6 +89,11 @@ export default function Home() {
   const [adminUsers, setAdminUsers] = useState<AdminUser[]>([])
   const isHost = userRole === 'admin' || user?.email === 'mikeclaudo@gmail.com'
   const [chatWidth, setChatWidth] = useState(340)
+  const [viewerCount, setViewerCount] = useState<number | null>(null)
+  const presenceIdRef = useRef<string | null>(null)
+  const annBarRef = useRef<HTMLDivElement | null>(null)
+  const [announcements, setAnnouncements] = useState<{ messages: string[]; interval: number } | null>(null)
+  const [annIndex, setAnnIndex] = useState(0)
 
   useEffect(() => {
     if (sessionStorage.getItem('dev_unlocked') === '1') setUnlocked(true)
@@ -55,6 +105,101 @@ export default function Home() {
     if (saved >= 260) setChatWidth(saved)
   }, [])
   useEffect(() => { localStorage.setItem('chat_width', String(chatWidth)) }, [chatWidth])
+
+  // ── Presence: write session on mount, heartbeat every 30s, delete on unload ──
+  useEffect(() => {
+    let sessionId = sessionStorage.getItem('rd_session_id')
+    if (!sessionId) {
+      sessionId = Math.random().toString(36).slice(2) + Date.now().toString(36)
+      sessionStorage.setItem('rd_session_id', sessionId)
+    }
+    presenceIdRef.current = sessionId
+    const presenceRef = doc(db, 'presence', sessionId)
+    const write = () => setDoc(presenceRef, { lastSeen: serverTimestamp() }, { merge: false }).catch(() => {})
+    write()
+    const hb = setInterval(write, 30000)
+    const remove = () => {
+      const projectId = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID ?? 'myplateform-792dd'
+      fetch(
+        `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/presence/${sessionId}`,
+        { method: 'DELETE', keepalive: true }
+      ).catch(() => {})
+    }
+    window.addEventListener('beforeunload', remove)
+    window.addEventListener('pagehide', remove)
+    return () => {
+      clearInterval(hb)
+      window.removeEventListener('beforeunload', remove)
+      window.removeEventListener('pagehide', remove)
+      deleteDoc(presenceRef).catch(() => {})
+    }
+  }, [])
+
+  // ── Remote viewer streams ────────────────────────────────────────────────────
+  useEffect(() => {
+    return onSnapshot(collection(db, 'viewerStreams'), snap => {
+      const active = snap.docs
+        .filter(d => d.data().active === true)
+        .map(d => ({ uid: d.id, name: d.data().name as string, x: d.data().x ?? 5, y: d.data().y ?? 5, w: d.data().w ?? 18 }))
+      setRemoteViewers(active)
+    }, () => {})
+  }, [])
+
+  // ── Presence: count active viewers (docs updated in last 60s) ───────────────
+  useEffect(() => {
+    const STALE_MS = 60_000
+    return onSnapshot(collection(db, 'presence'), snap => {
+      const now = Date.now()
+      setViewerCount(snap.docs.filter(d => {
+        const ls = d.data().lastSeen?.toMillis?.()
+        return ls && (now - ls) < STALE_MS
+      }).length)
+    }, () => {})
+  }, [])
+
+  // ── Announcements: sync from Firestore + cycle with fade ────────────────────
+  useEffect(() => {
+    return onSnapshot(doc(db, 'config', 'announcements'), snap => {
+      if (snap.exists()) {
+        const d = snap.data()
+        setAnnouncements({ messages: d.messages ?? [], interval: d.interval ?? 300 })
+        setAnnIndex(0)
+      } else {
+        setAnnouncements(null)
+      }
+    }, () => {})
+  }, [])
+
+  useEffect(() => {
+    const msgs = announcements?.messages
+    if (!msgs || msgs.length <= 1) return
+    const iv = (announcements?.interval ?? 300) * 1000
+    const timer = setInterval(() => {
+      setAnnIndex(i => (i + 1) % msgs.length)
+    }, iv)
+    return () => clearInterval(timer)
+  }, [announcements])
+
+  // WAAPI: animate each letter from the right edge of the bar to its natural position
+  useEffect(() => {
+    const bar = annBarRef.current
+    if (!bar) return
+    const spans = Array.from(bar.querySelectorAll<HTMLElement>('[data-ann-letter]'))
+    if (!spans.length) return
+    const screenRight = window.innerWidth
+    spans.forEach((span, i) => {
+      const rect = span.getBoundingClientRect()
+      const startX = screenRight - rect.left + 60
+      span.animate(
+        [
+          { transform: `translateX(${startX}px) rotate(540deg) scale(0.3)`, opacity: '0' },
+          { transform: 'translateX(0) rotate(0deg) scale(1)', opacity: '1' },
+        ],
+        { duration: 900, delay: i * 55, easing: 'cubic-bezier(0.15, 0.85, 0.3, 1)', fill: 'forwards' }
+      )
+    })
+  }, [annIndex, announcements])
+
   const onResizeStart = (e: { preventDefault: () => void }) => {
     e.preventDefault()
     const apply = (clientX: number) => {
@@ -86,7 +231,7 @@ export default function Home() {
   const [leftDrawerOpen, setLeftDrawerOpen] = useState(false)
   const [rightDrawerOpen, setRightDrawerOpen] = useState(false)
   const [rightTab, setRightTab] = useState<'menu' | 'amis' | 'crew'>('menu')
-  const [menuSection, setMenuSection] = useState<'profil' | 'notifications' | 'parametres' | 'historique' | 'source' | null>(null)
+  const [menuSection, setMenuSection] = useState<'profil' | 'notifications' | 'parametres' | 'historique' | 'source' | 'annonces' | null>(null)
 
   // ── Profile state ─────────────────────────────────────────────────────────
   const [userCreatedAt, setUserCreatedAt] = useState<string | null>(null)
@@ -104,10 +249,11 @@ export default function Home() {
   const cameraVideoRef = useRef<HTMLVideoElement | null>(null)
   const pcRef = useRef<RTCPeerConnection | null>(null)
   const localStreamRef = useRef<MediaStream | null>(null)
+  const authTokenRef = useRef<string>('')  // kept fresh for keepalive fetch on unload
 
   // ── YouTube synced playback (admin = host, viewers follow) ─────────────────
   const [ytApiReady, setYtApiReady] = useState(false)
-  const [viewerUnmuted, setViewerUnmuted] = useState(false)
+  const [viewerUnmuted, setViewerUnmuted] = useState(false)  // true = user wants sound on
   const ytWrapRef = useRef<HTMLDivElement | null>(null)
   const ytPlayerRef = useRef<unknown>(null)
   const playbackRef = useRef<{ playing?: boolean; time?: number; videoId?: string; updatedAt?: { seconds: number } } | null>(null)
@@ -117,12 +263,27 @@ export default function Home() {
 
   // ── Picture-in-Picture: admin camera overlaid on the YouTube video ─────────
   const [pipEnabled, setPipEnabled] = useState(false)
+  const [pipStreamReady, setPipStreamReady] = useState(false)
   const [pipX, setPipX] = useState(72)
   const [pipY, setPipY] = useState(66)
   const [pipDragging, setPipDragging] = useState(false)
+  const [pipW, setPipW] = useState(24)
+  const pipWRef = useRef(24)
   const pipVideoRef = useRef<HTMLVideoElement | null>(null)
   const playerBoxRef = useRef<HTMLDivElement | null>(null)
   const pipPosRef = useRef({ x: 72, y: 66 })
+  const [viewerPipActive, setViewerPipActive] = useState(false)
+  const viewerPipVideoRef = useRef<HTMLVideoElement | null>(null)
+  const viewerStreamRef = useRef<MediaStream | null>(null)
+  const viewerWhipPcRef = useRef<RTCPeerConnection | null>(null)
+  const [remoteViewers, setRemoteViewers] = useState<Array<{ uid: string; name: string; x: number; y: number; w: number }>>([])
+  const viewerResizeWRef = useRef(18)
+  const [viewerDragUid, setViewerDragUid] = useState<string | null>(null)
+  const viewerDragPosRef = useRef({ x: 5, y: 5 })
+  const isResizingRef = useRef(false)
+  const pipLatencyRef = useRef(0)
+  const pipEnabledRef = useRef(false)
+  const whepPcRef = useRef<RTCPeerConnection | null>(null)
 
   const syncViewer = useCallback(() => {
     const d = playbackRef.current
@@ -132,7 +293,8 @@ export default function Home() {
     const nowSec = Date.now() / 1000
     const ts = d.updatedAt?.seconds ?? nowSec
     const elapsed = d.playing ? Math.max(0, nowSec - ts) : 0
-    const target = (d.time ?? 0) + elapsed
+    const pipOffset = (pipEnabledRef.current && !!d.playing) ? pipLatencyRef.current : 0
+    const target = (d.time ?? 0) + elapsed - pipOffset
     const cur = player.getCurrentTime() || 0
     if (Math.abs(cur - target) > 1.5) { try { player.seekTo?.(target, true) } catch {} }
     const st = typeof player.getPlayerState === 'function' ? player.getPlayerState() : -1
@@ -163,6 +325,7 @@ export default function Home() {
 
   useEffect(() => {
     setShowTimestamps(localStorage.getItem('rd_timestamps') === 'true')
+    if (localStorage.getItem('rd_unmuted') === 'true') setViewerUnmuted(true)
   }, [])
 
   // Stream source — live sync so every open client updates instantly (no reload needed)
@@ -179,6 +342,7 @@ export default function Home() {
           setPipEnabled(!!d.pip)
           if (typeof d.pipX === 'number') { setPipX(d.pipX); pipPosRef.current.x = d.pipX }
           if (typeof d.pipY === 'number') { setPipY(d.pipY); pipPosRef.current.y = d.pipY }
+          if (typeof d.pipW === 'number') { setPipW(d.pipW); pipWRef.current = d.pipW }
         }
       },
       () => {}
@@ -196,6 +360,8 @@ export default function Home() {
     let cancelled = false
     ;(async () => {
       if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.muted = true
+        video.setAttribute('playsinline', '')
         video.src = src // Safari / iOS native HLS
       } else {
         const Hls = (await import('hls.js')).default
@@ -216,27 +382,176 @@ export default function Home() {
     if (v && localStreamRef.current) { v.srcObject = localStreamRef.current; v.muted = true }
   }, [broadcasting, pipEnabled, ytVideoId])
 
-  // PiP — viewers: play the camera HLS feed in the PiP box
+  useEffect(() => { pipEnabledRef.current = pipEnabled; if (!pipEnabled) setPipStreamReady(false) }, [pipEnabled])
+
+  useEffect(() => {
+    if (viewerPipActive && viewerPipVideoRef.current && viewerStreamRef.current) {
+      viewerPipVideoRef.current.srcObject = viewerStreamRef.current
+    }
+  }, [viewerPipActive])
+
+  // Track previous isHost to detect sign-out transition
+  const wasHostRef = useRef(false)
+  useEffect(() => {
+    if (isHost) {
+      // Admin loaded/reloaded — reset pip
+      setDoc(doc(db, 'config', 'stream'), { pip: false, updatedAt: serverTimestamp() }, { merge: true }).catch(() => {})
+      wasHostRef.current = true
+    } else if (wasHostRef.current) {
+      // Admin just signed out or auth expired — stop camera, keep stream source
+      stopBroadcast()
+      setDoc(doc(db, 'config', 'stream'), { pip: false, updatedAt: serverTimestamp() }, { merge: true }).catch(() => {})
+      wasHostRef.current = false
+    }
+  }, [isHost])
+
+  // Keep auth token fresh so it's available during beforeunload (async getIdToken won't work then)
+  useEffect(() => {
+    return onIdTokenChanged(auth, async u => {
+      authTokenRef.current = u ? await u.getIdToken() : ''
+    })
+  }, [])
+
+  // Clear stream URL + pip via Firestore REST API when admin closes/leaves the page.
+  // Uses fetch keepalive so the request completes even if the page is unloading.
+  useEffect(() => {
+    if (!isHost) return
+    const clearStream = () => {
+      const projectId = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID ?? 'myplateform-792dd'
+      const url = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/config/stream`
+        + '?updateMask.fieldPaths=pip'
+      fetch(url, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authTokenRef.current}` },
+        body: JSON.stringify({ fields: { pip: { booleanValue: false } } }),
+        keepalive: true,
+      }).catch(() => {})
+    }
+    window.addEventListener('beforeunload', clearStream)
+    window.addEventListener('pagehide', clearStream)
+    return () => {
+      window.removeEventListener('beforeunload', clearStream)
+      window.removeEventListener('pagehide', clearStream)
+    }
+  }, [isHost])
+
+  // Stop viewer broadcast on page unload
+  useEffect(() => {
+    if (!user || isHost) return
+    const stop = () => {
+      if (!viewerPipActive) return
+      const projectId = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID ?? 'myplateform-792dd'
+      fetch(
+        `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/viewerStreams/${user.uid}`,
+        { method: 'PATCH', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authTokenRef.current}` },
+          body: JSON.stringify({ fields: { active: { booleanValue: false } } }), keepalive: true }
+      ).catch(() => {})
+    }
+    window.addEventListener('beforeunload', stop)
+    window.addEventListener('pagehide', stop)
+    return () => { window.removeEventListener('beforeunload', stop); window.removeEventListener('pagehide', stop) }
+  }, [user, isHost, viewerPipActive])
+
+  // PiP — viewers: WebRTC (WHEP, ~100 ms) first; fall back to LL-HLS if not on LAN
   useEffect(() => {
     if (!pipEnabled || broadcasting || streamType !== 'youtube') return
     const video = pipVideoRef.current
     if (!video) return
-    const src = '/cam2/index.m3u8'
     let hls: { destroy: () => void } | null = null
     let cancelled = false
+
+    async function startWhep(vid: HTMLVideoElement): Promise<boolean> {
+      try {
+        const pc = new RTCPeerConnection()
+        const stream = new MediaStream()
+        pc.addTransceiver('video', { direction: 'recvonly' })
+        pc.addTransceiver('audio', { direction: 'recvonly' })
+        pc.ontrack = e => stream.addTrack(e.track)
+        const offer = await pc.createOffer()
+        await pc.setLocalDescription(offer)
+        // Wait for ICE gathering (2 s max)
+        await new Promise<void>(res => {
+          if (pc.iceGatheringState === 'complete') { res(); return }
+          const fn = () => { if (pc.iceGatheringState === 'complete') { pc.removeEventListener('icegatheringstatechange', fn); res() } }
+          pc.addEventListener('icegatheringstatechange', fn)
+          setTimeout(res, 2000)
+        })
+        if (cancelled) { pc.close(); return false }
+        const resp = await fetch('/mediamtx/cam/whep', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/sdp' },
+          body: pc.localDescription!.sdp,
+        })
+        if (!resp.ok) { pc.close(); return false }
+        const sdp = await resp.text()
+        await pc.setRemoteDescription({ type: 'answer', sdp })
+        // Wait for connected (5 s max)
+        await new Promise<void>((res, rej) => {
+          if (pc.connectionState === 'connected') { res(); return }
+          const fn = () => {
+            if (pc.connectionState === 'connected') { pc.removeEventListener('connectionstatechange', fn); res() }
+            if (['failed','closed','disconnected'].includes(pc.connectionState)) { pc.removeEventListener('connectionstatechange', fn); rej(new Error(pc.connectionState)) }
+          }
+          pc.addEventListener('connectionstatechange', fn)
+          setTimeout(() => rej(new Error('timeout')), 5000)
+        })
+        if (cancelled) { pc.close(); return false }
+        vid.muted = true
+        vid.setAttribute('playsinline', '')
+        vid.srcObject = stream
+        await vid.play().catch(() => {})
+        pipLatencyRef.current = 0  // WebRTC = real-time, no offset needed
+        whepPcRef.current = pc
+        setPipStreamReady(true)
+        return true
+      } catch { return false }
+    }
+
     ;(async () => {
+      const ok = await startWhep(video)
+      if (ok || cancelled) return
+
+      // WHEP failed (viewer not on LAN) — fall back to LL-HLS
+      const src = '/cam2/index.m3u8'
       if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.muted = true
+        video.setAttribute('playsinline', '')
         video.src = src
+        video.load()
+        video.play().catch(() => {})
+        pipLatencyRef.current = 2
+        video.addEventListener('canplay', () => {
+          setPipStreamReady(true)
+          const buf = video.buffered
+          if (buf.length > 0) {
+            const measured = buf.end(buf.length - 1) - video.currentTime + 0.5
+            pipLatencyRef.current = Math.max(0.5, Math.min(measured, 10))
+          }
+        }, { once: true })
       } else {
         const Hls = (await import('hls.js')).default
         if (cancelled || !Hls.isSupported()) return
         const h = new Hls({ lowLatencyMode: true, backBufferLength: 10 })
         h.loadSource(src)
         h.attachMedia(video)
+        h.on(Hls.Events.FRAG_CHANGED, () => {
+          setPipStreamReady(true)
+          if (h.latency > 0 && h.latency < 30) pipLatencyRef.current = h.latency
+        })
         hls = h
       }
     })()
-    return () => { cancelled = true; hls?.destroy(); video.removeAttribute('src'); video.load() }
+
+    return () => {
+      cancelled = true
+      whepPcRef.current?.close(); whepPcRef.current = null
+      hls?.destroy()
+      video.srcObject = null
+      video.removeAttribute('src')
+      video.load()
+      pipLatencyRef.current = 0
+      setPipStreamReady(false)
+    }
   }, [pipEnabled, broadcasting, streamType, ytVideoId])
 
   // Load the YouTube IFrame API once
@@ -312,9 +627,16 @@ export default function Home() {
   // Viewers: follow the host's playback in real time + correct drift
   useEffect(() => {
     if (isHost || !ytVideoId) return
+    let unmutedOnce = false
     const unsub = onSnapshot(doc(db, 'config', 'playback'), snap => {
       playbackRef.current = (snap.data() as typeof playbackRef.current) ?? null
       syncViewer()
+      // Unmute once after first sync if user previously chose sound
+      if (!unmutedOnce && localStorage.getItem('rd_unmuted') === 'true') {
+        unmutedOnce = true
+        const p = ytPlayerRef.current as { unMute?: () => void } | null
+        try { p?.unMute?.() } catch {}
+      }
     }, () => {})
     const drift = setInterval(syncViewer, 3000)
     return () => { unsub(); clearInterval(drift) }
@@ -517,6 +839,128 @@ export default function Home() {
     await setDoc(doc(db, 'config', 'stream'), { url, title, type, index: 0, updatedAt: serverTimestamp() }, { merge: true })
   }
 
+  const saveAnnouncements = async (messages: string[], interval: number) => {
+    await setDoc(doc(db, 'config', 'announcements'), { messages, interval, updatedAt: serverTimestamp() })
+  }
+
+  const startViewerResize = (e: React.MouseEvent | React.TouchEvent, uid: string, currentW: number) => {
+    if (!isHost) return
+    e.preventDefault()
+    e.stopPropagation()
+    const box = playerBoxRef.current
+    if (!box) return
+    const startX = 'touches' in e ? e.touches[0].clientX : e.clientX
+    const startW = currentW
+    const move = (clientX: number) => {
+      const r = box.getBoundingClientRect()
+      const delta = (clientX - startX) / r.width * 100
+      const w = Math.max(10, Math.min(55, startW + delta))
+      viewerResizeWRef.current = w
+      setRemoteViewers(prev => prev.map(v => v.uid === uid ? { ...v, w } : v))
+    }
+    const mm = (ev: MouseEvent) => move(ev.clientX)
+    const tm = (ev: TouchEvent) => { if (ev.touches[0]) move(ev.touches[0].clientX) }
+    const stop = () => {
+      window.removeEventListener('mousemove', mm)
+      window.removeEventListener('touchmove', tm)
+      window.removeEventListener('mouseup', stop)
+      window.removeEventListener('touchend', stop)
+      updateDoc(doc(db, 'viewerStreams', uid), { w: viewerResizeWRef.current }).catch(() => {})
+    }
+    window.addEventListener('mousemove', mm)
+    window.addEventListener('touchmove', tm, { passive: false })
+    window.addEventListener('mouseup', stop)
+    window.addEventListener('touchend', stop)
+  }
+
+  const startViewerDrag = (e: React.MouseEvent | React.TouchEvent, uid: string) => {
+    if (!isHost || isResizingRef.current) return
+    e.preventDefault()
+    const box = playerBoxRef.current
+    if (!box) return
+    setViewerDragUid(uid)
+    const move = (clientX: number, clientY: number) => {
+      const r = box.getBoundingClientRect()
+      const pw = r.width * 0.18
+      const ph = pw * 9 / 16
+      let x = ((clientX - r.left - pw / 2) / r.width) * 100
+      let y = ((clientY - r.top - ph / 2) / r.height) * 100
+      x = Math.max(0, Math.min(100 - (pw / r.width) * 100, x))
+      y = Math.max(0, Math.min(100 - (ph / r.height) * 100, y))
+      viewerDragPosRef.current = { x, y }
+      setRemoteViewers(prev => prev.map(v => v.uid === uid ? { ...v, x, y } : v))
+    }
+    const mm = (ev: MouseEvent) => move(ev.clientX, ev.clientY)
+    const tm = (ev: TouchEvent) => { if (ev.touches[0]) move(ev.touches[0].clientX, ev.touches[0].clientY) }
+    const stop = () => {
+      window.removeEventListener('mousemove', mm)
+      window.removeEventListener('touchmove', tm)
+      window.removeEventListener('mouseup', stop)
+      window.removeEventListener('touchend', stop)
+      setViewerDragUid(null)
+      const { x, y } = viewerDragPosRef.current
+      updateDoc(doc(db, 'viewerStreams', uid), { x, y }).catch(() => {})
+    }
+    window.addEventListener('mousemove', mm)
+    window.addEventListener('touchmove', tm, { passive: false })
+    window.addEventListener('mouseup', stop)
+    window.addEventListener('touchend', stop)
+  }
+
+  const startViewerPip = async () => {
+    if (!user) return
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+      viewerStreamRef.current = stream
+      // WHIP broadcast to MediaMTX
+      const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] })
+      viewerWhipPcRef.current = pc
+      stream.getTracks().forEach(t => pc.addTrack(t, stream))
+      // Force H.264
+      try {
+        const caps = RTCRtpSender.getCapabilities?.('video')
+        const vt = pc.getTransceivers().find(t => t.sender?.track?.kind === 'video')
+        if (caps && vt && typeof vt.setCodecPreferences === 'function') {
+          const h264 = caps.codecs.filter(c => /h264/i.test(c.mimeType))
+          if (h264.length) vt.setCodecPreferences([...h264, ...caps.codecs.filter(c => !/h264/i.test(c.mimeType))])
+        }
+      } catch {}
+      await pc.setLocalDescription(await pc.createOffer())
+      await new Promise<void>(resolve => {
+        if (pc.iceGatheringState === 'complete') return resolve()
+        const fn = () => { if (pc.iceGatheringState === 'complete') { pc.removeEventListener('icegatheringstatechange', fn); resolve() } }
+        pc.addEventListener('icegatheringstatechange', fn)
+        setTimeout(resolve, 2000)
+      })
+      const res = await fetch(`/mediamtx/viewer-${user.uid}/whip`, {
+        method: 'POST', headers: { 'Content-Type': 'application/sdp' }, body: pc.localDescription?.sdp ?? '',
+      })
+      if (!res.ok) throw new Error('WHIP ' + res.status)
+      await pc.setRemoteDescription({ type: 'answer', sdp: await res.text() })
+      // Local preview
+      if (viewerPipVideoRef.current) { viewerPipVideoRef.current.srcObject = stream; viewerPipVideoRef.current.muted = true }
+      // Firestore: mark active
+      const displayName = user.displayName?.split(' ')[0] || user.email?.split('@')[0] || 'viewer'
+      const activeCount = remoteViewers.filter(v => v.uid !== user.uid).length
+      const defaultX = 5 + (activeCount % 4) * 22
+      const defaultY = 5
+      await setDoc(doc(db, 'viewerStreams', user.uid), { active: true, name: displayName, startedAt: serverTimestamp(), x: defaultX, y: defaultY, w: 18 })
+      setViewerPipActive(true)
+    } catch (e) {
+      alert('Impossible de rejoindre : ' + (e as Error).message)
+      stopViewerPip()
+    }
+  }
+
+  const stopViewerPip = () => {
+    viewerStreamRef.current?.getTracks().forEach(t => t.stop())
+    viewerStreamRef.current = null
+    viewerWhipPcRef.current?.close(); viewerWhipPcRef.current = null
+    if (viewerPipVideoRef.current) viewerPipVideoRef.current.srcObject = null
+    if (user) setDoc(doc(db, 'viewerStreams', user.uid), { active: false }, { merge: true }).catch(() => {})
+    setViewerPipActive(false)
+  }
+
   const stopBroadcast = () => {
     pcRef.current?.close()
     pcRef.current = null
@@ -596,8 +1040,39 @@ export default function Home() {
   const nextVideo = () => goToVideo(currentIndex + 1)
   const prevVideo = () => goToVideo(currentIndex - 1)
 
-  const startPipDrag = (e: { preventDefault: () => void }) => {
+  const startPipResize = (e: React.MouseEvent | React.TouchEvent) => {
     if (!isHost) return
+    e.preventDefault()
+    e.stopPropagation()
+    const box = playerBoxRef.current
+    if (!box) return
+    const startX = 'touches' in e ? e.touches[0].clientX : e.clientX
+    const startW = pipWRef.current
+    const move = (clientX: number) => {
+      const r = box.getBoundingClientRect()
+      const delta = (clientX - startX) / r.width * 100
+      const w = Math.max(10, Math.min(55, startW + delta))
+      setPipW(w); pipWRef.current = w
+    }
+    const mm = (ev: MouseEvent) => move(ev.clientX)
+    const tm = (ev: TouchEvent) => { if (ev.touches[0]) move(ev.touches[0].clientX) }
+    isResizingRef.current = true
+    const stop = () => {
+      isResizingRef.current = false
+      window.removeEventListener('mousemove', mm)
+      window.removeEventListener('touchmove', tm)
+      window.removeEventListener('mouseup', stop)
+      window.removeEventListener('touchend', stop)
+      writePip({ pipW: pipWRef.current })
+    }
+    window.addEventListener('mousemove', mm)
+    window.addEventListener('touchmove', tm, { passive: false })
+    window.addEventListener('mouseup', stop)
+    window.addEventListener('touchend', stop)
+  }
+
+  const startPipDrag = (e: React.MouseEvent | React.TouchEvent) => {
+    if (!isHost || isResizingRef.current) return
     e.preventDefault()
     const box = playerBoxRef.current
     if (!box) return
@@ -629,6 +1104,8 @@ export default function Home() {
   }
 
   const handleSignOut = async () => {
+    if (broadcasting) stopBroadcast()
+    setDoc(doc(db, 'config', 'stream'), { pip: false, updatedAt: serverTimestamp() }, { merge: true }).catch(() => {})
     await signOut(auth)
     setUserMenuOpen(false)
     setRightDrawerOpen(false)
@@ -721,8 +1198,17 @@ export default function Home() {
       {/* Nav */}
       <nav className='flex items-center justify-between px-3 border-b border-[#00ff41]/30 shrink-0 h-[60px]'>
         <span className='text-base sm:text-lg font-bold tracking-widest'>RoshDynamics</span>
-        <div className='w-auto sm:w-64 grid grid-cols-2 gap-2'>
-          <div />
+        <div className='flex items-center gap-2'>
+          <div className='flex items-center gap-1.5'>
+            {(['⬡','◈','⊞','◉','▲'] as const).map((icon, i) => (
+              <button
+                key={i}
+                style={{ width:'29px', height:'29px', border:'1.5px solid rgba(0,255,65,0.35)', background:'rgba(0,255,65,0.05)', color:'rgba(0,255,65,0.5)', borderRadius:'4px', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', fontSize:'13px', transition:'all 0.15s' }}
+                onMouseOver={e => { e.currentTarget.style.background='rgba(0,255,65,0.12)'; e.currentTarget.style.borderColor='rgba(0,255,65,0.7)'; e.currentTarget.style.color='#00ff41' }}
+                onMouseOut={e => { e.currentTarget.style.background='rgba(0,255,65,0.05)'; e.currentTarget.style.borderColor='rgba(0,255,65,0.35)'; e.currentTarget.style.color='rgba(0,255,65,0.5)' }}
+              >{icon}</button>
+            ))}
+          </div>
           <div className='flex justify-center'>
             {user ? (
               <div className='relative'>
@@ -777,6 +1263,13 @@ export default function Home() {
           open={leftDrawerOpen}
           onClose={() => setLeftDrawerOpen(false)}
           onToggle={() => setLeftDrawerOpen(o => !o)}
+          user={user}
+          isHost={isHost}
+          streamTitle={streamTitle}
+          onAuthRequired={() => setModal('login')}
+          viewerPipActive={viewerPipActive}
+          onJoinLive={startViewerPip}
+          onLeaveLive={stopViewerPip}
         />
 
         {/* Main content */}
@@ -795,21 +1288,49 @@ export default function Home() {
                   <span className={`w-2 h-2 rounded-full ${broadcasting ? 'bg-[#ff4141] animate-pulse' : 'bg-[#00ff41]/30'}`} />
                   <span className='text-xs tracking-widest'>{broadcasting ? 'EN DIRECT · CAMERA' : 'CAMERA'}</span>
                 </div>
+                {viewerCount !== null && (
+                  <div className='absolute top-2 right-3 text-[10px] tracking-widest text-[#00ff41]/55 pointer-events-none'>{viewerCount} 👁</div>
+                )}
               </>
             ) : ytVideoId ? (
               <>
                 <div ref={ytWrapRef} className='w-full h-full' />
+                {/* YouTube chrome mask via box-shadow — renders above iframe in compositor */}
+                {!isHost && (
+                  <div
+                    className='absolute inset-0 pointer-events-none z-[15]'
+                    style={{
+                      boxShadow: [
+                        // bottom bar: share/queue buttons
+                        'inset 0 -10% 0 0 #000',
+                        // top-left end card
+                        'inset 35% 0 80% -84% #000',
+                        // bottom-right more videos
+                        'inset -45% 30% 0 -70% #000',
+                      ].join(', '),
+                    }}
+                  />
+                )}
                 {!isHost && (
                   <div
                     className='absolute inset-0 z-10 cursor-pointer'
                     onClick={() => {
                       const p = ytPlayerRef.current as { isMuted?: () => boolean; unMute?: () => void } | null
-                      if (p?.isMuted?.()) { p.unMute?.(); setViewerUnmuted(true) }
+                      if (p?.isMuted?.()) { p.unMute?.(); setViewerUnmuted(true); localStorage.setItem('rd_unmuted', 'true') }
                     }}
                   />
                 )}
-                <div className='absolute top-2 right-3 text-[10px] tracking-widest text-[#00ff41]/45 pointer-events-none'>
-                  {isHost ? '● CONTROLE ADMIN' : 'SYNC ADMIN'}
+
+                {!isHost && !viewerUnmuted && (
+                  <div className='absolute bottom-3 left-1/2 -translate-x-1/2 z-20 text-[10px] tracking-widest text-[#00ff41]/70 bg-black/60 px-3 py-1.5 border border-[#00ff41]/30 pointer-events-none'>
+                    cliquez pour activer le son
+                  </div>
+                )}
+                <div className='absolute top-2 right-3 flex flex-col items-end gap-1 pointer-events-none'>
+                  <span className='text-[10px] tracking-widest text-[#00ff41]/45'>{isHost ? '● CONTROLE ADMIN' : 'SYNC ADMIN'}</span>
+                  {viewerCount !== null && (
+                    <span className='text-[10px] tracking-widest text-[#00ff41]/55'>{viewerCount} 👁</span>
+                  )}
                 </div>
                 {playlist.length > 1 && (
                   <div className='absolute top-2 left-3 z-20 flex items-center gap-2 bg-black/70 border border-[#00ff41]/30 px-2 py-1'>
@@ -824,11 +1345,7 @@ export default function Home() {
                     )}
                   </div>
                 )}
-                {!isHost && !viewerUnmuted && (
-                  <div className='absolute bottom-3 left-1/2 -translate-x-1/2 z-20 text-[10px] tracking-widest text-[#00ff41]/70 bg-black/60 px-3 py-1.5 border border-[#00ff41]/30 pointer-events-none'>
-                    cliquez pour activer le son
-                  </div>
-                )}
+
               </>
             ) : streamUrl && getEmbedUrl(streamUrl) ? (
               <iframe
@@ -844,7 +1361,9 @@ export default function Home() {
                   <span className='w-2 h-2 rounded-full bg-[#00ff41] animate-pulse' />
                   <span className='text-xs tracking-widest'>EN DIRECT</span>
                 </div>
-                <div className='absolute top-2 right-3 text-xs text-[#00ff41]/50'>2,341 SPECTATEURS</div>
+                {viewerCount !== null && (
+                  <div className='absolute top-2 right-3 text-xs text-[#00ff41]/50'>{viewerCount} SPECTATEUR{viewerCount !== 1 ? 'S' : ''}</div>
+                )}
                 <div className='absolute inset-0 flex items-center justify-center'>
                   <div className='text-center'>
                     <div className='text-5xl opacity-20'>&#9654;</div>
@@ -866,22 +1385,75 @@ export default function Home() {
             {ytVideoId && pipEnabled && (
               <div
                 className='absolute z-20 border border-[#00ff41]/60 bg-black overflow-hidden shadow-lg'
-                style={{ left: `${pipX}%`, top: `${pipY}%`, width: '24%', aspectRatio: '16 / 9', cursor: isHost ? 'move' : 'default' }}
+                style={{ left: `${pipX}%`, top: `${pipY}%`, width: `${pipW}%`, aspectRatio: '16 / 9', cursor: isHost ? 'move' : 'default' }}
                 onMouseDown={isHost ? startPipDrag : undefined}
                 onTouchStart={isHost ? startPipDrag : undefined}
               >
-                <video ref={pipVideoRef} autoPlay muted={isHost ? true : !viewerUnmuted} playsInline className='w-full h-full object-cover pointer-events-none' />
+                <video ref={pipVideoRef} autoPlay muted={isHost ? true : !viewerUnmuted} playsInline className={'w-full h-full object-cover pointer-events-none transition-opacity duration-500' + (isHost || pipStreamReady ? '' : ' opacity-0')} />
                 {isHost && <div className='absolute top-0.5 left-1 text-[8px] text-[#00ff41]/80 tracking-widest pointer-events-none'>PIP · GLISSER</div>}
+                {isHost && <div data-resize='true' className='absolute bottom-0 right-0 w-5 h-5 cursor-se-resize z-20 flex items-end justify-end p-0.5' style={{background:'transparent'}} onMouseDown={startPipResize} onTouchStart={startPipResize}><span style={{width:'10px',height:'10px',borderRight:'2px solid rgba(0,255,65,0.8)',borderBottom:'2px solid rgba(0,255,65,0.8)',display:'block',pointerEvents:'none'}} /></div>}
               </div>
             )}
+            {/* Remote viewer streams — admin-draggable absolute PiPs */}
+            {remoteViewers.filter(v => v.uid !== user?.uid).map(v => (
+              <div
+                key={v.uid}
+                className='absolute z-20 border border-[#00ff41]/50 bg-black overflow-hidden shadow-lg'
+                style={{ left: `${v.x}%`, top: `${v.y}%`, width: `${v.w}%`, aspectRatio: '16/9', cursor: isHost ? 'move' : 'default' }}
+                onMouseDown={isHost ? e => startViewerDrag(e, v.uid) : undefined}
+                onTouchStart={isHost ? e => startViewerDrag(e, v.uid) : undefined}
+              >
+                <ViewerStream uid={v.uid} name={v.name} />
+                {isHost && <div className='absolute top-0.5 left-1 text-[8px] text-[#00ff41]/60 tracking-widest pointer-events-none'>⠿ {v.name}</div>}
+                {isHost && <div data-resize='true' className='absolute bottom-0 right-0 w-5 h-5 cursor-se-resize z-20 flex items-end justify-end p-0.5' style={{background:'transparent'}} onMouseDown={e => startViewerResize(e, v.uid, v.w)} onTouchStart={e => startViewerResize(e, v.uid, v.w)}><span style={{width:'10px',height:'10px',borderRight:'2px solid rgba(0,255,65,0.8)',borderBottom:'2px solid rgba(0,255,65,0.8)',display:'block',pointerEvents:'none'}} /></div>}
+              </div>
+            ))}
+
             {/* drag shield: stops the YouTube iframe from swallowing mouse events while dragging */}
             {pipDragging && <div className='absolute inset-0 z-30' style={{ cursor: 'move' }} />}
+            {viewerDragUid && <div className='absolute inset-0 z-30' style={{ cursor: 'move' }} />}
+
+            {/* Viewer self-cam PiP — position from Firestore (admin-controlled) */}
+            {!isHost && viewerPipActive && (() => {
+              const myPos = remoteViewers.find(v => v.uid === user?.uid)
+              return (
+                <div className='absolute z-20 border border-[#00ff41]/60 bg-black overflow-hidden shadow-lg'
+                  style={{ left: `${myPos?.x ?? 5}%`, top: `${myPos?.y ?? 5}%`, width: `${myPos?.w ?? 18}%`, aspectRatio: '16/9' }}>
+                  <video ref={viewerPipVideoRef} autoPlay muted playsInline className='w-full h-full object-cover' />
+                  <button onClick={stopViewerPip} className='absolute top-1 right-1 text-[9px] text-[#ff4141]/70 hover:text-[#ff4141] bg-black/60 px-1 leading-none'>✕</button>
+                  <div className='absolute bottom-0.5 left-1 text-[8px] text-[#00ff41]/60 tracking-widest pointer-events-none'>MOI</div>
+                </div>
+              )
+            })()}
           </div>
-          <div className='border border-[#00ff41]/30 px-4 bg-[#00ff41]/5 shrink-0 h-[65px] flex flex-col justify-center'>
-            <h2 className='text-sm font-bold tracking-wider'>
-              {streamTitle || 'Intelligence Artificielle : Menace ou Opportunite ?'}
-            </h2>
-            <p className='text-[#00ff41]/50 text-xs mt-0.5'>par <span className='text-[#00ff41]/80'>@4n0nz</span> - Demarre il y a 2h - 847 interactions</p>
+          <div className='border border-[#00ff41]/30 px-4 bg-[#00ff41]/5 shrink-0 h-[65px] flex items-center overflow-hidden'>
+            {announcements?.messages?.length ? (() => {
+                const [top, bottom] = (announcements.messages[annIndex % announcements.messages.length] ?? '').split('\n')
+                const renderLetters = (text: string, className: string) => (
+                  <p className={className}>
+                    {text.split('').map((char, i) => (
+                      <span
+                        key={i}
+                        data-ann-letter
+                        style={{ display: 'inline-block', opacity: 0 }}
+                      >{char === ' ' ? '\u00A0' : char}</span>
+                    ))}
+                  </p>
+                )
+                return (
+                  <div key={annIndex} ref={annBarRef} className='flex flex-col justify-center overflow-hidden'>
+                    {renderLetters(top ?? '', 'text-sm font-bold tracking-wider')}
+                    {bottom && renderLetters(bottom, 'text-[#00ff41]/50 text-xs mt-0.5')}
+                  </div>
+                )
+              })() : (
+              <div className='flex flex-col justify-center'>
+                <h2 className='text-sm font-bold tracking-wider'>
+                  {streamTitle || 'Intelligence Artificielle : Menace ou Opportunite ?'}
+                </h2>
+                <p className='text-[#00ff41]/50 text-xs mt-0.5'>par <span className='text-[#00ff41]/80'>@4n0nz</span> - Demarre il y a 2h - 847 interactions</p>
+              </div>
+            )}
           </div>
         </div>
 
@@ -971,6 +1543,8 @@ export default function Home() {
             stopBroadcast={stopBroadcast}
             pipEnabled={pipEnabled}
             togglePip={togglePip}
+            announcements={announcements}
+            saveAnnouncements={saveAnnouncements}
           />
 
           {user && (
