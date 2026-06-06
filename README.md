@@ -35,11 +35,12 @@ A self-hosted live-streaming platform with a synchronized watching experience: a
 - **Persistent audio preference** — remembers whether the viewer had sound enabled across page reloads.
 - **Animated letter intro** for announcement messages (letters fly in from the right with spin effect).
 - **YouTube chrome masked** for viewers (end cards, share buttons, "More videos" hidden via box-shadow overlay).
-- **Resizable chat panel** — drag the divider between stream and chat on desktop.
+- **Resizable chat panel** — drag the divider between stream and chat on desktop (default 440px).
 - **Dev access gate** with animated intro sequence.
 - **Responsive** — stacked layout on mobile/tablet, resizable split on desktop.
 - **5 placeholder nav buttons** — square icon buttons in the navbar, ready to wire up.
 - **Left sidebar** — "Join the live" CTA: opens auth modal for guests, activates camera for logged-in viewers.
+- **Chat popup mode** — `/chat` opens in a standalone window; the main page auto-switches to the cameras panel to avoid duplicate chat.
 
 ### Social preview
 - Open Graph / Twitter cards with a generated brand image.
@@ -233,4 +234,3 @@ npm run build && pm2 restart platform
 - Set `webrtcAdditionalHosts` in `mediamtx.yml` to the server LAN IP.
 - Add your public hostname to **Firebase → Authentication → Authorized domains**.
 - MediaMTX `all_others:` path allows viewer streams on dynamic paths (`viewer-{uid}`) without extra config.
-ENDOFREADME

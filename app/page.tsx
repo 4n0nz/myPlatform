@@ -11,9 +11,11 @@ import {
 import {
   collection, addDoc, query, orderBy, limit, onSnapshot,
   serverTimestamp, doc, getDoc, setDoc, getDocs, updateDoc,
-  where, arrayUnion, writeBatch, deleteDoc,
+  where, arrayUnion, writeBatch, deleteDoc, deleteField,
 } from 'firebase/firestore'
 import { auth, db } from '@/lib/firebase'
+import app from '@/lib/firebase'
+import { ADMIN_EMAILS } from './constants'
 
 import PasswordGate from './components/PasswordGate'
 import IntroAnimation from './components/IntroAnimation'
@@ -24,7 +26,7 @@ import RightDrawer from './components/RightDrawer'
 
 import type {
   UserRole, Message, FriendReq, Friend,
-  Crew, CrewMember, PublicCrew, AdminUser,
+  Crew, CrewMember, PublicCrew, AdminUser, Poll, Schedule, AppNotification,
 } from './types'
 
 function getYouTubeIds(text: string): string[] {
@@ -87,11 +89,16 @@ export default function Home() {
   const [unlocked, setUnlocked] = useState(false)
   const [userRole, setUserRole] = useState<UserRole | null>(null)
   const [adminUsers, setAdminUsers] = useState<AdminUser[]>([])
-  const isHost = userRole === 'admin' || user?.email === 'mikeclaudo@gmail.com'
-  const [chatWidth, setChatWidth] = useState(340)
+  const isHost = userRole === 'admin' || ADMIN_EMAILS.includes(user?.email ?? '')
+  const [chatWidth, setChatWidth] = useState(440)
+  const [chatPopupOpen, setChatPopupOpen] = useState(false)
+  const [rightPanel, setRightPanel] = useState<'cams' | 'chat'>('chat')
   const [viewerCount, setViewerCount] = useState<number | null>(null)
   const presenceIdRef = useRef<string | null>(null)
   const annBarRef = useRef<HTMLDivElement | null>(null)
+  const ghostModeRef = useRef(false)
+  const streamVolumeRef = useRef(100)
+  const notifPrevLenRef = useRef(0)
   const [announcements, setAnnouncements] = useState<{ messages: string[]; interval: number } | null>(null)
   const [annIndex, setAnnIndex] = useState(0)
 
@@ -101,10 +108,10 @@ export default function Home() {
 
   // Resizable chat width (desktop): user drags the divider between stream and chat
   useEffect(() => {
-    const saved = Number(localStorage.getItem('chat_width'))
+    const saved = Number(localStorage.getItem('chat_width_v10'))
     if (saved >= 260) setChatWidth(saved)
   }, [])
-  useEffect(() => { localStorage.setItem('chat_width', String(chatWidth)) }, [chatWidth])
+  useEffect(() => { localStorage.setItem('chat_width_v10', String(chatWidth)) }, [chatWidth])
 
   // ── Presence: write session on mount, heartbeat every 30s, delete on unload ──
   useEffect(() => {
@@ -115,7 +122,7 @@ export default function Home() {
     }
     presenceIdRef.current = sessionId
     const presenceRef = doc(db, 'presence', sessionId)
-    const write = () => setDoc(presenceRef, { lastSeen: serverTimestamp() }, { merge: false }).catch(() => {})
+    const write = () => { if (!ghostModeRef.current) setDoc(presenceRef, { lastSeen: serverTimestamp() }, { merge: false }).catch(() => {}) }
     write()
     const hb = setInterval(write, 30000)
     const remove = () => {
@@ -231,11 +238,18 @@ export default function Home() {
   const [leftDrawerOpen, setLeftDrawerOpen] = useState(false)
   const [rightDrawerOpen, setRightDrawerOpen] = useState(false)
   const [rightTab, setRightTab] = useState<'menu' | 'amis' | 'crew'>('menu')
-  const [menuSection, setMenuSection] = useState<'profil' | 'notifications' | 'parametres' | 'historique' | 'source' | 'annonces' | null>(null)
+  const [menuSection, setMenuSection] = useState<'profil' | 'notifications' | 'parametres' | 'historique' | 'source' | 'annonces' | 'sondage' | 'programme' | 'pip' | null>(null)
 
   // ── Profile state ─────────────────────────────────────────────────────────
   const [userCreatedAt, setUserCreatedAt] = useState<string | null>(null)
   const [showTimestamps, setShowTimestamps] = useState(false)
+  const [chatFontSize, setChatFontSize] = useState<'S' | 'M' | 'L'>('M')
+  const [streamVolume, setStreamVolume] = useState(100)
+  const [notifSound, setNotifSound] = useState(false)
+  const [ghostMode, setGhostMode] = useState(false)
+  const [blockedUsers, setBlockedUsers] = useState<Array<{ uid: string; name: string }>>([])
+  const [fcmEnabled, setFcmEnabled] = useState(false)
+  const [appNotifications, setAppNotifications] = useState<AppNotification[]>([])
   const [editingName, setEditingName] = useState(false)
   const [newDisplayName, setNewDisplayName] = useState('')
   const [userIcon, setUserIcon] = useState('')
@@ -309,6 +323,11 @@ export default function Home() {
   const resettingChat = useRef(false)
   const [chatFullscreen, setChatFullscreen] = useState(false)
   const [userPopup, setUserPopup] = useState<{ uid: string; name: string } | null>(null)
+  const [poll, setPoll] = useState<Poll | null>(null)
+  const [annPollSlot, setAnnPollSlot] = useState<'poll' | 'ann'>('poll')
+  const [schedule, setSchedule] = useState<Schedule | null>(null)
+  const [mutedUntil, setMutedUntil] = useState<Date | null>(null)
+  const [isBanned, setIsBanned] = useState(false)
 
   // ── Social state ──────────────────────────────────────────────────────────
   const [incomingFriendReqs, setIncomingFriendReqs] = useState<FriendReq[]>([])
@@ -326,7 +345,61 @@ export default function Home() {
   useEffect(() => {
     setShowTimestamps(localStorage.getItem('rd_timestamps') === 'true')
     if (localStorage.getItem('rd_unmuted') === 'true') setViewerUnmuted(true)
+    const fs = localStorage.getItem('rd_chatFontSize')
+    if (fs === 'S' || fs === 'M' || fs === 'L') setChatFontSize(fs)
+      const vol = Number(localStorage.getItem('rd_volume'))
+    if (!isNaN(vol) && vol >= 0 && vol <= 100) setStreamVolume(vol)
+    if (localStorage.getItem('rd_notifSound') === 'true') setNotifSound(true)
+    if (localStorage.getItem('rd_ghostMode') === 'true') setGhostMode(true)
+    if (localStorage.getItem('rd_fcmEnabled') === 'true') setFcmEnabled(true)
+    try {
+      const blocked = JSON.parse(localStorage.getItem('rd_blocked') ?? '[]')
+      if (Array.isArray(blocked)) setBlockedUsers(blocked)
+    } catch {}
   }, [])
+
+  // Sync refs
+  useEffect(() => { ghostModeRef.current = ghostMode }, [ghostMode])
+  useEffect(() => { streamVolumeRef.current = streamVolume; localStorage.setItem('rd_volume', String(streamVolume)) }, [streamVolume])
+
+  // Ghost mode: delete/restore presence
+  useEffect(() => {
+    if (!presenceIdRef.current) return
+    if (ghostMode) {
+      deleteDoc(doc(db, 'presence', presenceIdRef.current)).catch(() => {})
+    } else {
+      setDoc(doc(db, 'presence', presenceIdRef.current), { lastSeen: serverTimestamp() }, { merge: false }).catch(() => {})
+    }
+  }, [ghostMode])
+
+  // YT volume: apply when slider changes
+  useEffect(() => {
+    const p = ytPlayerRef.current as { setVolume?: (v: number) => void } | null
+    p?.setVolume?.(streamVolume)
+  }, [streamVolume])
+
+  // Notification sound: beep on new messages from others
+  useEffect(() => {
+    if (messages.length <= notifPrevLenRef.current) { notifPrevLenRef.current = messages.length; return }
+    const newMsgs = messages.slice(notifPrevLenRef.current)
+    notifPrevLenRef.current = messages.length
+    if (!notifSound) return
+    if (!newMsgs.some(m => m.uid !== user?.uid)) return
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const Ctx = window.AudioContext || (window as any).webkitAudioContext
+      if (!Ctx) return
+      const ctx = new Ctx() as AudioContext
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.connect(gain); gain.connect(ctx.destination)
+      osc.type = 'sine'; osc.frequency.value = 880
+      gain.gain.setValueAtTime(0.07, ctx.currentTime)
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2)
+      osc.start(); osc.stop(ctx.currentTime + 0.2)
+      setTimeout(() => ctx.close().catch(() => {}), 500)
+    } catch {}
+  }, [messages, notifSound, user?.uid])
 
   // Stream source — live sync so every open client updates instantly (no reload needed)
   useEffect(() => {
@@ -388,7 +461,11 @@ export default function Home() {
     if (viewerPipActive && viewerPipVideoRef.current && viewerStreamRef.current) {
       viewerPipVideoRef.current.srcObject = viewerStreamRef.current
     }
-  }, [viewerPipActive])
+  }, [viewerPipActive, chatPopupOpen])
+
+  useEffect(() => {
+    setRightPanel(chatPopupOpen ? 'cams' : 'chat')
+  }, [chatPopupOpen])
 
   // Track previous isHost to detect sign-out transition
   const wasHostRef = useRef(false)
@@ -599,7 +676,8 @@ export default function Home() {
         rel: 0, modestbranding: 1, playsinline: 1, fs: isHost ? 1 : 0,
       },
       events: {
-        onReady: () => { if (!isHost) syncViewer() },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        onReady: (e: any) => { if (!isHost) syncViewer(); try { e.target.setVolume(streamVolumeRef.current) } catch {} },
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         onStateChange: (e: any) => {
           if (!isHost) return
@@ -620,7 +698,6 @@ export default function Home() {
       if (hb) clearInterval(hb)
       try { player.destroy() } catch {}
       ytPlayerRef.current = null
-      wrap.innerHTML = ''
     }
   }, [ytApiReady, ytVideoId, isHost, syncViewer])
 
@@ -648,7 +725,7 @@ export default function Home() {
       setUser(u)
       if (!u) { setUserRole(null); return }
       const ref = doc(db, 'users', u.uid)
-      const isAdmin = u.email === 'mikeclaudo@gmail.com'
+      const isAdmin = ADMIN_EMAILS.includes(u.email ?? '')
       try {
         const snap = await getDoc(ref)
         if (!snap.exists()) {
@@ -731,6 +808,8 @@ export default function Home() {
       if (ts) setUserCreatedAt(ts.toLocaleDateString('fr-CA', { year: 'numeric', month: 'short', day: 'numeric' }))
       if (snap.data().icon !== undefined) setUserIcon(snap.data().icon ?? '')
       if (snap.data().color) setUserColor(snap.data().color)
+      setMutedUntil(snap.data().mutedUntil?.toDate?.() ?? null)
+      setIsBanned(snap.data().banned ?? false)
     })
   }, [user])
 
@@ -774,6 +853,57 @@ export default function Home() {
     })
   }, [rightTab, myCrew])
 
+  // In-app notifications listener
+  useEffect(() => {
+    if (!user) { setAppNotifications([]); return }
+    const q = query(
+      collection(db, 'notifications'),
+      where('uid', '==', user.uid),
+      orderBy('createdAt', 'desc'),
+      limit(20)
+    )
+    return onSnapshot(q, snap => {
+      setAppNotifications(snap.docs.map(d => ({
+        id: d.id,
+        title: d.data().title as string,
+        body: d.data().body as string,
+        type: d.data().type as string,
+        read: d.data().read as boolean,
+        createdAt: d.data().createdAt?.toDate?.() ?? null,
+      })))
+    }, () => {})
+  }, [user?.uid])
+
+  useEffect(() => {
+    return onSnapshot(doc(db, 'config', 'poll'), snap => {
+      if (snap.exists()) setPoll(snap.data() as Poll)
+      else setPoll(null)
+    }, () => {})
+  }, [])
+
+  useEffect(() => {
+    if (!poll?.active) return
+    setAnnPollSlot('poll')
+    const iv = setInterval(() => setAnnPollSlot(s => s === 'poll' ? 'ann' : 'poll'), 30000)
+    return () => clearInterval(iv)
+  }, [poll?.active])
+
+  useEffect(() => {
+    return onSnapshot(doc(db, 'config', 'schedule'), snap => {
+      if (snap.exists()) setSchedule(snap.data() as Schedule)
+      else setSchedule(null)
+    }, () => {})
+  }, [])
+
+  useEffect(() => {
+    const bc = new BroadcastChannel('chat_popup')
+    bc.onmessage = (e) => {
+      if (e.data === 'open') setChatPopupOpen(true)
+      if (e.data === 'close') setChatPopupOpen(false)
+    }
+    return () => bc.close()
+  }, [])
+
   // ── Helpers ───────────────────────────────────────────────────────────────
 
   const myDisplayName = (u: FirebaseUser) =>
@@ -803,6 +933,7 @@ export default function Home() {
   const sendMessage = async () => {
     const text = chatInput.trim()
     if (!text) return
+    if (isBanned || (mutedUntil && mutedUntil > new Date())) return
     setChatInput('')
     const username = user ? myDisplayName(user) : 'anon_' + Math.floor(Math.random() * 9999)
     try {
@@ -836,11 +967,57 @@ export default function Home() {
     setStreamTitle(title)
     setStreamType(type)
     setCurrentIndex(0)
-    await setDoc(doc(db, 'config', 'stream'), { url, title, type, index: 0, updatedAt: serverTimestamp() }, { merge: true })
+    try {
+      await setDoc(doc(db, 'config', 'stream'), { url, title, type, index: 0, updatedAt: serverTimestamp() }, { merge: true })
+    } catch (e) {
+      console.error('saveStreamSource setDoc error:', e)
+    }
+  }
+
+  const broadcastNotify = (title: string, body: string) => {
+    fetch('/api/notify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, body, type: 'stream_live' }),
+    }).catch(() => {})
   }
 
   const saveAnnouncements = async (messages: string[], interval: number) => {
     await setDoc(doc(db, 'config', 'announcements'), { messages, interval, updatedAt: serverTimestamp() })
+  }
+
+  const votePoll = async (optionIndex: number) => {
+    if (!user || !poll?.active || user.uid in (poll.votes ?? {})) return
+    await setDoc(doc(db, 'config', 'poll'), { votes: { [user.uid]: optionIndex } }, { merge: true })
+  }
+
+  const createPoll = async (question: string, options: string[]) => {
+    await setDoc(doc(db, 'config', 'poll'), { active: true, question, options, votes: {}, createdAt: serverTimestamp() })
+  }
+
+  const closePoll = async () => {
+    await updateDoc(doc(db, 'config', 'poll'), { active: false })
+  }
+
+  const muteChatUser = async (uid: string, minutes: number) => {
+    const until = new Date(Date.now() + minutes * 60 * 1000)
+    await updateDoc(doc(db, 'users', uid), { mutedUntil: until })
+  }
+
+  const unmuteUser = async (uid: string) => {
+    await updateDoc(doc(db, 'users', uid), { mutedUntil: deleteField() })
+  }
+
+  const banChatUser = async (uid: string) => {
+    await updateDoc(doc(db, 'users', uid), { banned: true })
+  }
+
+  const unbanUser = async (uid: string) => {
+    await updateDoc(doc(db, 'users', uid), { banned: false })
+  }
+
+  const saveSchedule = async (date: string, title: string) => {
+    await setDoc(doc(db, 'config', 'schedule'), { active: !!date, date, title, updatedAt: serverTimestamp() })
   }
 
   const startViewerResize = (e: React.MouseEvent | React.TouchEvent, uid: string, currentW: number) => {
@@ -1111,6 +1288,48 @@ export default function Home() {
     setRightDrawerOpen(false)
   }
 
+  const blockedUids = blockedUsers.map(b => b.uid)
+  const filteredMessages = messages.filter(m => !m.uid || !blockedUids.includes(m.uid))
+  const enablePush = async () => {
+    if (!user) return
+    try {
+      const { getMessaging, getToken } = await import('firebase/messaging')
+      const messaging = getMessaging(app)
+      const token = await getToken(messaging, {
+        vapidKey: process.env.NEXT_PUBLIC_FIREBASE_VAPID_KEY,
+        serviceWorkerRegistration: await navigator.serviceWorker.register('/firebase-messaging-sw.js'),
+      })
+      if (token) {
+        await updateDoc(doc(db, 'users', user.uid), { fcmToken: token })
+        setFcmEnabled(true)
+        localStorage.setItem('rd_fcmEnabled', 'true')
+      }
+    } catch (e) {
+      console.error('FCM:', e)
+    }
+  }
+
+  const markNotificationsRead = async () => {
+    if (!user) return
+    const unread = appNotifications.filter(n => !n.read)
+    if (!unread.length) return
+    const batch = writeBatch(db)
+    unread.forEach(n => batch.update(doc(db, 'notifications', n.id), { read: true }))
+    await batch.commit()
+  }
+
+  const blockUser = (uid: string, name: string) => {
+    const updated = [...blockedUsers.filter(b => b.uid !== uid), { uid, name }]
+    setBlockedUsers(updated)
+    setUserPopup(null)
+    localStorage.setItem('rd_blocked', JSON.stringify(updated))
+  }
+  const unblockUser = (uid: string) => {
+    const updated = blockedUsers.filter(b => b.uid !== uid)
+    setBlockedUsers(updated)
+    localStorage.setItem('rd_blocked', JSON.stringify(updated))
+  }
+
   const sendFriendRequest = async (toUid: string, toName: string) => {
     if (!user) return
     setUserPopup(null)
@@ -1193,6 +1412,43 @@ export default function Home() {
       {intro && <IntroAnimation onDone={handleIntroDone} />}
       {modal && <AuthModal mode={modal} onClose={() => setModal(null)} />}
 
+      {/* Modal sondage — uniquement si >2 options et pas encore répondu */}
+      {poll?.active && poll.options.length > 2 && user && !(user.uid in (poll.votes ?? {})) && (
+        <div className='fixed inset-0 z-50 flex items-center justify-center bg-black/80'>
+          <div className='bg-black border border-[#00ff41]/50 px-6 py-5 w-full max-w-sm mx-4'>
+            <div className='text-[9px] text-[#00ff41]/35 tracking-widest mb-3'>SONDAGE</div>
+            <div className='text-[13px] font-bold tracking-wide text-[#00ff41] mb-4'>{poll.question}</div>
+            <div className='flex flex-col gap-2'>
+              {poll.options.map((opt, i) => {
+                const totalVotes = Object.keys(poll.votes ?? {}).length
+                const count = Object.values(poll.votes ?? {}).filter(v => v === i).length
+                const pct = totalVotes > 0 ? Math.round(count / totalVotes * 100) : 0
+                const hasVoted = user.uid in (poll.votes ?? {})
+                const voted = hasVoted && (poll.votes ?? {})[user.uid] === i
+                return (
+                  <button key={i} disabled={hasVoted} onClick={() => votePoll(i)}
+                    className='relative text-left text-[11px] border overflow-hidden transition-all'
+                    style={{ borderColor: voted ? 'rgba(0,255,65,0.7)' : 'rgba(0,255,65,0.25)', color: voted ? '#00ff41' : 'rgba(0,255,65,0.7)', padding: '8px 12px', background: 'transparent', cursor: hasVoted ? 'default' : 'pointer' }}
+                  >
+                    <div className='absolute inset-0 transition-all duration-500' style={{ width: hasVoted ? `${pct}%` : '0%', background: 'rgba(0,255,65,0.07)' }} />
+                    <span className='relative z-10'>{opt}</span>
+                    {hasVoted && <span className='relative z-10 float-right text-[10px] text-[#00ff41]/45'>{pct}%</span>}
+                  </button>
+                )
+              })}
+            </div>
+            <div className='mt-3 flex items-center justify-between'>
+              <span className='text-[9px] text-[#00ff41]/30 tracking-widest'>
+                {Object.keys(poll.votes ?? {}).length} vote{Object.keys(poll.votes ?? {}).length !== 1 ? 's' : ''}
+              </span>
+              {isHost && (
+                <button onClick={closePoll} className='text-[9px] tracking-widest text-[#ff4141]/50 hover:text-[#ff4141] transition-colors'>■ fermer</button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className='w-full h-[2px] bg-[#00ff41] shrink-0' />
 
       {/* Nav */}
@@ -1200,20 +1456,26 @@ export default function Home() {
         <span className='text-base sm:text-lg font-bold tracking-widest'>RoshDynamics</span>
         <div className='flex items-center gap-2'>
           <div className='flex items-center gap-1.5'>
-            {(['⬡','◈','⊞','◉','▲'] as const).map((icon, i) => (
-              <button
-                key={i}
-                style={{ width:'29px', height:'29px', border:'1.5px solid rgba(0,255,65,0.35)', background:'rgba(0,255,65,0.05)', color:'rgba(0,255,65,0.5)', borderRadius:'4px', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', fontSize:'13px', transition:'all 0.15s' }}
-                onMouseOver={e => { e.currentTarget.style.background='rgba(0,255,65,0.12)'; e.currentTarget.style.borderColor='rgba(0,255,65,0.7)'; e.currentTarget.style.color='#00ff41' }}
-                onMouseOut={e => { e.currentTarget.style.background='rgba(0,255,65,0.05)'; e.currentTarget.style.borderColor='rgba(0,255,65,0.35)'; e.currentTarget.style.color='rgba(0,255,65,0.5)' }}
-              >{icon}</button>
-            ))}
+            {(['⬡','◈','⊞','◉','▲'] as const).map((icon, i) => {
+              const isCamToggle = i === 4
+              const active = isCamToggle && rightPanel === 'cams'
+              return (
+                <button
+                  key={i}
+                  onClick={isCamToggle ? () => setRightPanel(p => p === 'cams' ? 'chat' : 'cams') : undefined}
+                  title={isCamToggle ? (rightPanel === 'cams' ? 'Voir le chat' : 'Voir les caméras') : undefined}
+                  style={{ minWidth:'52px', height:'29px', padding:'0 8px', border: `1.5px solid ${active ? 'rgba(0,255,65,0.9)' : 'rgba(0,255,65,0.35)'}`, background: active ? 'rgba(0,255,65,0.18)' : 'rgba(0,255,65,0.05)', color: active ? '#00ff41' : 'rgba(0,255,65,0.5)', borderRadius:'4px', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', fontSize:'13px', transition:'all 0.15s' }}
+                  onMouseOver={e => { e.currentTarget.style.background='rgba(0,255,65,0.12)'; e.currentTarget.style.borderColor='rgba(0,255,65,0.7)'; e.currentTarget.style.color='#00ff41' }}
+                  onMouseOut={e => { e.currentTarget.style.background= active ? 'rgba(0,255,65,0.18)' : 'rgba(0,255,65,0.05)'; e.currentTarget.style.borderColor= active ? 'rgba(0,255,65,0.9)' : 'rgba(0,255,65,0.35)'; e.currentTarget.style.color= active ? '#00ff41' : 'rgba(0,255,65,0.5)' }}
+                >{isCamToggle ? (rightPanel === 'chat' ? 'Cam' : 'Chat') : icon}</button>
+              )
+            })}
           </div>
           <div className='flex justify-center'>
             {user ? (
               <div className='relative'>
                 <button
-                  onClick={() => setUserMenuOpen(o => !o)}
+                  onClick={() => setRightDrawerOpen(o => !o)}
                   style={{ fontFamily:'Arial,sans-serif', fontSize:'10px', height:'29px', padding:'0 10px', borderRadius:'5px', border:'1.5px solid #00ff41', background:'rgba(0,255,65,0.08)', color:'#00ff41', display:'flex', alignItems:'center', gap:'6px', cursor:'pointer', fontWeight:600, letterSpacing:'0.5px', maxWidth:'150px' }}
                 >
                   <User size={11}/>
@@ -1227,22 +1489,6 @@ export default function Home() {
                     }}>{userRole.toUpperCase()}</span>
                   )}
                 </button>
-                {userMenuOpen && (
-                  <div
-                    className='absolute right-0 top-full mt-1 rounded-lg overflow-hidden z-40'
-                    style={{ background: '#060d07', border: '1px solid rgba(0,255,65,0.3)', minWidth: '140px', boxShadow: '0 8px 24px rgba(0,0,0,0.6)' }}
-                  >
-                    <div className='px-3 py-2 border-b border-[#00ff41]/20 text-[10px] text-[#00ff41]/50 font-mono truncate'>
-                      {user.email}
-                    </div>
-                    <button
-                      onClick={handleSignOut}
-                      className='w-full flex items-center gap-2 px-3 py-2.5 text-[11px] font-mono text-[#00ff41]/70 hover:text-[#00ff41] hover:bg-[#00ff41]/10 transition-all'
-                    >
-                      <LogOut size={12}/> Deconnexion
-                    </button>
-                  </div>
-                )}
               </div>
             ) : (
               <button
@@ -1270,6 +1516,12 @@ export default function Home() {
           viewerPipActive={viewerPipActive}
           onJoinLive={startViewerPip}
           onLeaveLive={stopViewerPip}
+          adminUsers={adminUsers}
+          changeRole={changeRole}
+          muteChatUser={muteChatUser}
+          unmuteUser={unmuteUser}
+          banChatUser={banChatUser}
+          unbanUser={unbanUser}
         />
 
         {/* Main content */}
@@ -1294,7 +1546,7 @@ export default function Home() {
               </>
             ) : ytVideoId ? (
               <>
-                <div ref={ytWrapRef} className='w-full h-full' />
+                <div key={ytVideoId ?? ''} ref={ytWrapRef} className='w-full h-full' />
                 {/* YouTube chrome mask via box-shadow — renders above iframe in compositor */}
                 {!isHost && (
                   <div
@@ -1365,14 +1617,27 @@ export default function Home() {
                   <div className='absolute top-2 right-3 text-xs text-[#00ff41]/50'>{viewerCount} SPECTATEUR{viewerCount !== 1 ? 'S' : ''}</div>
                 )}
                 <div className='absolute inset-0 flex items-center justify-center'>
-                  <div className='text-center'>
-                    <div className='text-5xl opacity-20'>&#9654;</div>
-                    <p className='text-[#00ff41]/30 text-xs tracking-widest mt-2'>
-                      {(userRole === 'admin' || user?.email === 'mikeclaudo@gmail.com')
-                        ? 'Configurez la source dans le menu admin'
-                        : 'STREAM EN COURS'}
-                    </p>
-                  </div>
+                  {schedule?.active && schedule.date ? (
+                    <div className='text-center px-4'>
+                      <div className='text-[10px] tracking-widest text-[#00ff41]/40 mb-3'>PROCHAINE SESSION</div>
+                      <div className='text-2xl font-bold tracking-wide capitalize'>
+                        {new Date(schedule.date).toLocaleDateString('fr-CA', { weekday: 'long', day: 'numeric', month: 'long' })}
+                      </div>
+                      <div className='text-lg text-[#00ff41]/70 mt-1'>
+                        {new Date(schedule.date).toLocaleTimeString('fr-CA', { hour: '2-digit', minute: '2-digit' })}
+                      </div>
+                      {schedule.title && <div className='text-[11px] text-[#00ff41]/45 mt-3 tracking-wide'>{schedule.title}</div>}
+                    </div>
+                  ) : (
+                    <div className='text-center'>
+                      <div className='text-5xl opacity-20'>&#9654;</div>
+                      <p className='text-[#00ff41]/30 text-xs tracking-widest mt-2'>
+                        {(userRole === 'admin' || ADMIN_EMAILS.includes(user?.email ?? ''))
+                          ? 'Configurez la source dans le menu admin'
+                          : 'STREAM EN COURS'}
+                      </p>
+                    </div>
+                  )}
                 </div>
                 <div className='absolute bottom-2 left-3 right-3 flex justify-between'>
                   <span className='text-xs text-[#00ff41]/60'>SUJET #1 - TECHNOLOGIE & SOCIETE</span>
@@ -1394,12 +1659,12 @@ export default function Home() {
                 {isHost && <div data-resize='true' className='absolute bottom-0 right-0 w-5 h-5 cursor-se-resize z-20 flex items-end justify-end p-0.5' style={{background:'transparent'}} onMouseDown={startPipResize} onTouchStart={startPipResize}><span style={{width:'10px',height:'10px',borderRight:'2px solid rgba(0,255,65,0.8)',borderBottom:'2px solid rgba(0,255,65,0.8)',display:'block',pointerEvents:'none'}} /></div>}
               </div>
             )}
-            {/* Remote viewer streams — admin-draggable absolute PiPs */}
-            {remoteViewers.filter(v => v.uid !== user?.uid).map(v => (
+            {/* Remote viewer streams — dans les carrés, pas en PiP */}
+            {false && remoteViewers.filter(v => v.uid !== user?.uid).map(v => (
               <div
                 key={v.uid}
                 className='absolute z-20 border border-[#00ff41]/50 bg-black overflow-hidden shadow-lg'
-                style={{ left: `${v.x}%`, top: `${v.y}%`, width: `${v.w}%`, aspectRatio: '16/9', cursor: isHost ? 'move' : 'default' }}
+                style={{ left: `${v.x}%`, top: `${v.y}%`, width: `${v.w}%`, aspectRatio: '1/1', cursor: isHost ? 'move' : 'default' }}
                 onMouseDown={isHost ? e => startViewerDrag(e, v.uid) : undefined}
                 onTouchStart={isHost ? e => startViewerDrag(e, v.uid) : undefined}
               >
@@ -1413,12 +1678,12 @@ export default function Home() {
             {pipDragging && <div className='absolute inset-0 z-30' style={{ cursor: 'move' }} />}
             {viewerDragUid && <div className='absolute inset-0 z-30' style={{ cursor: 'move' }} />}
 
-            {/* Viewer self-cam PiP — position from Firestore (admin-controlled) */}
-            {!isHost && viewerPipActive && (() => {
+            {/* Viewer self-cam — dans les carrés, pas en PiP */}
+            {false && !isHost && viewerPipActive && (() => {
               const myPos = remoteViewers.find(v => v.uid === user?.uid)
               return (
                 <div className='absolute z-20 border border-[#00ff41]/60 bg-black overflow-hidden shadow-lg'
-                  style={{ left: `${myPos?.x ?? 5}%`, top: `${myPos?.y ?? 5}%`, width: `${myPos?.w ?? 18}%`, aspectRatio: '16/9' }}>
+                  style={{ left: `${myPos?.x ?? 5}%`, top: `${myPos?.y ?? 5}%`, width: `${myPos?.w ?? 18}%`, aspectRatio: '1/1' }}>
                   <video ref={viewerPipVideoRef} autoPlay muted playsInline className='w-full h-full object-cover' />
                   <button onClick={stopViewerPip} className='absolute top-1 right-1 text-[9px] text-[#ff4141]/70 hover:text-[#ff4141] bg-black/60 px-1 leading-none'>✕</button>
                   <div className='absolute bottom-0.5 left-1 text-[8px] text-[#00ff41]/60 tracking-widest pointer-events-none'>MOI</div>
@@ -1426,8 +1691,43 @@ export default function Home() {
               )
             })()}
           </div>
-          <div className='border border-[#00ff41]/30 px-4 bg-[#00ff41]/5 shrink-0 h-[65px] flex items-center overflow-hidden'>
-            {announcements?.messages?.length ? (() => {
+
+          {/* Poll + Annonce — zone unifiée, alterne toutes les 30s quand sondage actif */}
+          <div className='border border-[#00ff41]/30 px-4 bg-[#00ff41]/5 shrink-0 h-[90px] flex items-center overflow-hidden'>
+            {poll?.active && poll.options.length <= 2 && annPollSlot === 'poll' ? (
+              <div className='w-full'>
+                <div className='flex items-center justify-between mb-1'>
+                  <span className='text-[9px] font-bold tracking-widest text-[#00ff41] truncate flex-1 mr-2'>{poll.question}</span>
+                  <div className='flex items-center gap-2 shrink-0'>
+                    <span className='text-[8px] text-[#00ff41]/30 tracking-widest'>
+                      {Object.keys(poll.votes ?? {}).length}v{!user && ' \u00B7 login'}
+                    </span>
+                    {isHost && (
+                      <button onClick={closePoll} className='text-[8px] tracking-widest text-[#ff4141]/50 hover:text-[#ff4141] transition-colors'>\u25A0</button>
+                    )}
+                  </div>
+                </div>
+                <div className='flex flex-col gap-0.5'>
+                  {poll.options.map((opt, i) => {
+                    const totalVotes = Object.keys(poll.votes ?? {}).length
+                    const count = Object.values(poll.votes ?? {}).filter(v => v === i).length
+                    const pct = totalVotes > 0 ? Math.round(count / totalVotes * 100) : 0
+                    const hasVoted = user ? user.uid in (poll.votes ?? {}) : false
+                    const voted = hasVoted && (poll.votes ?? {})[user!.uid] === i
+                    return (
+                      <button key={i} disabled={hasVoted || !user} onClick={() => votePoll(i)}
+                        className='relative text-left text-[10px] border overflow-hidden transition-all'
+                        style={{ borderColor: voted ? 'rgba(0,255,65,0.7)' : 'rgba(0,255,65,0.2)', color: voted ? '#00ff41' : 'rgba(0,255,65,0.6)', padding: '2px 6px', background: 'transparent', cursor: hasVoted ? 'default' : 'pointer' }}
+                      >
+                        <div className='absolute inset-0 transition-all duration-500' style={{ width: hasVoted ? `${pct}%` : '0%', background: 'rgba(0,255,65,0.07)' }} />
+                        <span className='relative z-10'>{opt}</span>
+                        {hasVoted && <span className='relative z-10 float-right text-[9px] text-[#00ff41]/45'>{pct}%</span>}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            ) : announcements?.messages?.length ? (() => {
                 const [top, bottom] = (announcements.messages[annIndex % announcements.messages.length] ?? '').split('\n')
                 const renderLetters = (text: string, className: string) => (
                   <p className={className}>
@@ -1457,16 +1757,8 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Resize handle (desktop only) — drag to share width between stream and chat */}
-        <div
-          onMouseDown={onResizeStart}
-          onTouchStart={onResizeStart}
-          title='Glisser pour redimensionner'
-          className='hidden lg:flex shrink-0 w-1.5 cursor-col-resize bg-[#00ff41]/10 hover:bg-[#00ff41]/40 active:bg-[#00ff41]/60 transition-colors items-center justify-center group select-none'
-        >
-          <div className='w-[2px] h-8 bg-[#00ff41]/40 group-hover:bg-[#00ff41] rounded' />
-        </div>
-
+        {rightPanel === 'chat' && (
+          <>
         {/* Right sidebar — chat + drawer */}
         <div
           className='relative flex flex-col overflow-hidden w-full flex-1 min-h-0 border-t lg:border-t-0 lg:border-l border-[#00ff41]/20 lg:flex-none lg:w-[var(--chat-w)]'
@@ -1474,7 +1766,7 @@ export default function Home() {
         >
           <div className='flex flex-col h-full overflow-hidden'>
             <ChatPanel
-              messages={messages}
+              messages={filteredMessages}
               chatInput={chatInput}
               setChatInput={setChatInput}
               sendMessage={sendMessage}
@@ -1488,6 +1780,10 @@ export default function Home() {
               sentReqUids={sentReqUids}
               sendFriendRequest={sendFriendRequest}
               onAuthRequired={() => setModal('login')}
+              isMuted={isBanned || (mutedUntil?.getTime() ?? 0) > Date.now()}
+              mutedUntil={isBanned ? null : mutedUntil}
+              chatFontSize={chatFontSize}
+              blockUser={blockUser}
             />
           </div>
 
@@ -1512,6 +1808,20 @@ export default function Home() {
             userCreatedAt={userCreatedAt}
             showTimestamps={showTimestamps}
             setShowTimestamps={setShowTimestamps}
+            chatFontSize={chatFontSize}
+            setChatFontSize={setChatFontSize}
+            streamVolume={streamVolume}
+            setStreamVolume={setStreamVolume}
+            notifSound={notifSound}
+            setNotifSound={setNotifSound}
+            ghostMode={ghostMode}
+            setGhostMode={setGhostMode}
+            blockedUsers={blockedUsers}
+            unblockUser={unblockUser}
+            fcmEnabled={fcmEnabled}
+            enablePush={enablePush}
+            appNotifications={appNotifications}
+            markNotificationsRead={markNotificationsRead}
             handleSignOut={handleSignOut}
             messages={messages}
             incomingFriendReqs={incomingFriendReqs}
@@ -1538,6 +1848,7 @@ export default function Home() {
             streamTitle={streamTitle}
             streamType={streamType}
             saveStreamSource={saveStreamSource}
+            broadcastNotify={broadcastNotify}
             broadcasting={broadcasting}
             startBroadcast={startBroadcast}
             stopBroadcast={stopBroadcast}
@@ -1545,18 +1856,55 @@ export default function Home() {
             togglePip={togglePip}
             announcements={announcements}
             saveAnnouncements={saveAnnouncements}
+            poll={poll}
+            createPoll={createPoll}
+            closePoll={closePoll}
+            schedule={schedule}
+            saveSchedule={saveSchedule}
+            muteChatUser={muteChatUser}
+            unmuteUser={unmuteUser}
+            banChatUser={banChatUser}
+            unbanUser={unbanUser}
           />
 
-          {user && (
-            <button
-              onClick={() => setRightDrawerOpen(o => !o)}
-              className='absolute top-1/2 -translate-y-1/2 right-0 z-50 w-6 h-10 flex items-center justify-center bg-black border border-[#00ff41]/30 text-[#00ff41]/50 hover:text-[#00ff41] hover:border-[#00ff41]/70 transition-all'
-              style={{ fontSize: '9px', borderRadius: '0 3px 3px 0' }}
-            >
-              {rightDrawerOpen ? '▶' : '◀'}
-            </button>
-          )}
         </div>
+          </>
+        )}
+
+        {rightPanel === 'cams' && (
+          <div
+            className='border-t lg:border-t-0 lg:border-l border-[#00ff41]/20 lg:flex-none lg:w-[var(--chat-w)] shrink-0 grid grid-cols-2 gap-[1px] bg-[#00ff41]/10 p-[1px]'
+            style={{ '--chat-w': `${chatWidth}px` } as CSSProperties}
+          >
+            {Array.from({ length: 8 }).map((_, i) => {
+              const viewer = remoteViewers[i]
+              const isSelf = viewer?.uid === user?.uid
+
+              if (viewer) return (
+                <div key={viewer.uid} className='relative bg-black border border-[#00ff41]/25 overflow-hidden' style={{ aspectRatio: '1/1' }}>
+                  {isSelf
+                    ? <video ref={viewerPipVideoRef} autoPlay muted playsInline className='w-full h-full object-cover' />
+                    : <ViewerStream uid={viewer.uid} name={viewer.name} />
+                  }
+                  <div className='absolute bottom-0.5 left-1 text-[8px] text-[#00ff41]/60 tracking-widest pointer-events-none'>{isSelf ? 'MOI' : viewer.name}</div>
+                  {isSelf && <button onClick={stopViewerPip} className='absolute top-1 right-1 text-[8px] text-[#ff4141]/70 hover:text-[#ff4141] bg-black/60 px-1 leading-none'>✕</button>}
+                </div>
+              )
+
+              if (i === remoteViewers.length && user && !isHost && !viewerPipActive) return (
+                <div key='join' onClick={startViewerPip}
+                  className='bg-black border border-[#00ff41]/20 hover:border-[#00ff41]/50 hover:bg-[#00ff41]/5 transition-all cursor-pointer flex flex-col items-center justify-center gap-1'
+                  style={{ aspectRatio: '1/1' }}
+                >
+                  <span className='text-lg'>📷</span>
+                  <span className='text-[8px] tracking-widest text-[#00ff41]/45'>REJOINDRE</span>
+                </div>
+              )
+
+              return <div key={i} className='bg-black border border-[#00ff41]/10' style={{ aspectRatio: '1/1' }} />
+            })}
+          </div>
+        )}
 
       </div>
 

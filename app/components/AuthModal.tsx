@@ -5,6 +5,7 @@ import {
   signInWithPopup,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
+  updateProfile,
 } from 'firebase/auth'
 import { auth, googleProvider } from '@/lib/firebase'
 
@@ -39,7 +40,10 @@ export default function AuthModal({ mode, onClose }: { mode: 'login' | 'register
       if (isLogin) {
         await signInWithEmailAndPassword(auth, email, password)
       } else {
-        await createUserWithEmailAndPassword(auth, email, password)
+        const cred = await createUserWithEmailAndPassword(auth, email, password)
+        if (username.trim()) {
+          await updateProfile(cred.user, { displayName: username.trim() })
+        }
       }
       onClose()
     } catch (e: unknown) {
@@ -124,9 +128,9 @@ export default function AuthModal({ mode, onClose }: { mode: 'login' | 'register
             <button
               onClick={() => setError('Facebook — bientôt disponible')}
               disabled={loading}
-              className='flex items-center justify-center gap-2 py-2.5 rounded-lg border border-[#00ff41]/25 text-[#00ff41]/80 hover:border-[#00ff41]/55 hover:bg-[#00ff41]/[0.05] transition-all text-[11px] font-mono disabled:opacity-50 disabled:cursor-not-allowed'
+              className='flex items-center justify-center gap-2 py-2.5 rounded-lg border border-[#ff4141]/30 bg-[#ff4141]/5 text-[#00ff41]/30 text-[11px] font-mono cursor-not-allowed'
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="#00ff41" className='shrink-0'>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="rgba(255,65,65,0.4)" className='shrink-0'>
                 <path d="M24 12.073C24 5.405 18.627 0 12 0S0 5.405 0 12.073c0 6.024 4.388 11.02 10.125 11.927v-8.437H7.078v-3.49h3.047V9.41c0-3.025 1.792-4.697 4.533-4.697 1.312 0 2.686.235 2.686.235v2.97h-1.513c-1.491 0-1.956.93-1.956 1.886v2.27h3.328l-.532 3.49h-2.796V24C19.612 23.093 24 18.097 24 12.073z"/>
               </svg>
               Facebook
@@ -134,9 +138,9 @@ export default function AuthModal({ mode, onClose }: { mode: 'login' | 'register
             <button
               onClick={() => setError('X — bientôt disponible')}
               disabled={loading}
-              className='flex items-center justify-center gap-2 py-2.5 rounded-lg border border-[#00ff41]/25 text-[#00ff41]/80 hover:border-[#00ff41]/55 hover:bg-[#00ff41]/[0.05] transition-all text-[11px] font-mono disabled:opacity-50 disabled:cursor-not-allowed'
+              className='flex items-center justify-center gap-2 py-2.5 rounded-lg border border-[#ff4141]/30 bg-[#ff4141]/5 text-[#00ff41]/30 text-[11px] font-mono cursor-not-allowed'
             >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="#00ff41" className='shrink-0'>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="rgba(255,65,65,0.4)" className='shrink-0'>
                 <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.744l7.737-8.835L1.254 2.25H8.08l4.253 5.622L18.244 2.25zm-1.161 17.52h1.833L7.084 4.126H5.117L17.083 19.77z"/>
               </svg>
               X
@@ -144,9 +148,9 @@ export default function AuthModal({ mode, onClose }: { mode: 'login' | 'register
             <button
               onClick={() => setError('Telegram — bientôt disponible')}
               disabled={loading}
-              className='flex items-center justify-center gap-2 py-2.5 rounded-lg border border-[#00ff41]/25 text-[#00ff41]/80 hover:border-[#00ff41]/55 hover:bg-[#00ff41]/[0.05] transition-all text-[11px] font-mono disabled:opacity-50 disabled:cursor-not-allowed'
+              className='flex items-center justify-center gap-2 py-2.5 rounded-lg border border-[#ff4141]/30 bg-[#ff4141]/5 text-[#00ff41]/30 text-[11px] font-mono cursor-not-allowed'
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="#00ff41" className='shrink-0'>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="rgba(255,65,65,0.4)" className='shrink-0'>
                 <path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/>
               </svg>
               Telegram

@@ -35,3 +35,25 @@ export type PublicCrew = {
 }
 
 export type AdminUser = { uid: string; email: string; displayName: string; role: string }
+
+export type Poll = {
+  active: boolean
+  question: string
+  options: string[]
+  votes: Record<string, number>
+}
+
+export type Schedule = {
+  active: boolean
+  date: string
+  title: string
+}
+
+export type AppNotification = {
+  id: string
+  title: string
+  body: string
+  type: string
+  read: boolean
+  createdAt: Date | null
+}

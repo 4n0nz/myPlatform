@@ -1,5 +1,7 @@
 export const DEV_PASSWORD = process.env.NEXT_PUBLIC_DEV_PASSWORD ?? ''
 
+export const ADMIN_EMAILS = ['mikeclaudo@gmail.com', 'yann.roshdy@gmail.com']
+
 export const ICONS = [
   '🤖','👾','💀','🦊','🐺','🦁','🐉','🔥','⚡','🎭',
   '🌑','💎','🔮','🎯','🌊','🦅','🧬','🌙','⭐','🎲','🃏','🦄','🐦',
