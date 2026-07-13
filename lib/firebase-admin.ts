@@ -15,4 +15,5 @@ function initAdmin() {
 const app = initAdmin()
 export const adminDb   = app ? admin.firestore(app) : null
 export const adminMsg  = app ? admin.messaging(app) : null
+export const adminAuth = app ? admin.auth(app) : null
 export const serverTs  = admin.firestore.FieldValue.serverTimestamp

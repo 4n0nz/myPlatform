@@ -39,6 +39,20 @@ function getYouTubeIds(text: string): string[] {
 }
 
 
+function ScheduleLines({ lines }: { lines: { text: string; format: string }[] }) {
+  const cls = (f: string) => f === 'titre' ? 'text-2xl font-bold' : f === 'soustitre' ? 'text-lg font-bold text-[#00ff41]/80' : 'text-sm text-[#00ff41]/55'
+  return (
+    <>
+      {lines.map((l, i) => {
+        const ll = l as { text?: string; format?: string } | string
+        const text = typeof ll === 'string' ? ll : (ll.text ?? '')
+        const fmt = typeof ll === 'string' ? 'paragraphe' : (ll.format ?? 'paragraphe')
+        return <div key={i} className={cls(fmt) + ' tracking-wide'}>{text}</div>
+      })}
+    </>
+  )
+}
+
 // ── ViewerStream: WHEP consumer for a single remote viewer camera ─────────────
 function ViewerStream({ uid, name }: { uid: string; name: string }) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
@@ -100,6 +114,8 @@ export default function Home() {
   const streamVolumeRef = useRef(100)
   const notifPrevLenRef = useRef(0)
   const [announcements, setAnnouncements] = useState<{ messages: string[]; interval: number } | null>(null)
+  const [restream, setRestream] = useState<{ tiktok: boolean; youtube: boolean; facebook: boolean; x: boolean; luxmedia: boolean }>({ tiktok: false, youtube: false, facebook: false, x: false, luxmedia: false })
+  const [restreamKeys, setRestreamKeys] = useState<Record<'tiktok' | 'youtube' | 'facebook' | 'x' | 'luxmedia', { url: string; keySet: boolean; keyHint: string }> | null>(null)
   const [annIndex, setAnnIndex] = useState(0)
 
   useEffect(() => {
@@ -115,6 +131,7 @@ export default function Home() {
 
   // ── Presence: write session on mount, heartbeat every 30s, delete on unload ──
   useEffect(() => {
+    if (!unlocked) return
     let sessionId = sessionStorage.getItem('rd_session_id')
     if (!sessionId) {
       sessionId = Math.random().toString(36).slice(2) + Date.now().toString(36)
@@ -122,7 +139,14 @@ export default function Home() {
     }
     presenceIdRef.current = sessionId
     const presenceRef = doc(db, 'presence', sessionId)
-    const write = () => { if (!ghostModeRef.current) setDoc(presenceRef, { lastSeen: serverTimestamp() }, { merge: false }).catch(() => {}) }
+    const IDLE_MS = 5 * 60_000
+    let lastActivity = Date.now()
+    const bump = () => { lastActivity = Date.now() }
+    const write = () => {
+      if (ghostModeRef.current) return
+      if (document.hidden || Date.now() - lastActivity > IDLE_MS) { deleteDoc(presenceRef).catch(() => {}); return }
+      setDoc(presenceRef, { lastSeen: serverTimestamp() }, { merge: false }).catch(() => {})
+    }
     write()
     const hb = setInterval(write, 30000)
     const remove = () => {
@@ -132,15 +156,21 @@ export default function Home() {
         { method: 'DELETE', keepalive: true }
       ).catch(() => {})
     }
+    const onVis = () => { if (document.hidden) deleteDoc(presenceRef).catch(() => {}); else { bump(); write() } }
+    const acts = ['mousemove', 'keydown', 'touchstart', 'click', 'scroll']
     window.addEventListener('beforeunload', remove)
     window.addEventListener('pagehide', remove)
+    document.addEventListener('visibilitychange', onVis)
+    acts.forEach(e => window.addEventListener(e, bump, { passive: true }))
     return () => {
       clearInterval(hb)
       window.removeEventListener('beforeunload', remove)
       window.removeEventListener('pagehide', remove)
+      document.removeEventListener('visibilitychange', onVis)
+      acts.forEach(e => window.removeEventListener(e, bump))
       deleteDoc(presenceRef).catch(() => {})
     }
-  }, [])
+  }, [unlocked])
 
   // ── Remote viewer streams ────────────────────────────────────────────────────
   useEffect(() => {
@@ -174,6 +204,14 @@ export default function Home() {
       } else {
         setAnnouncements(null)
       }
+    }, () => {})
+  }, [])
+
+  // ── Restream: sync platform toggles from Firestore ──────────────────
+  useEffect(() => {
+    return onSnapshot(doc(db, 'config', 'restream'), snap => {
+      const d = snap.data()
+      setRestream({ tiktok: !!d?.tiktok, youtube: !!d?.youtube, facebook: !!d?.facebook, x: !!d?.x, luxmedia: !!d?.luxmedia })
     }, () => {})
   }, [])
 
@@ -238,7 +276,7 @@ export default function Home() {
   const [leftDrawerOpen, setLeftDrawerOpen] = useState(false)
   const [rightDrawerOpen, setRightDrawerOpen] = useState(false)
   const [rightTab, setRightTab] = useState<'menu' | 'amis' | 'crew'>('menu')
-  const [menuSection, setMenuSection] = useState<'profil' | 'notifications' | 'parametres' | 'historique' | 'source' | 'annonces' | 'sondage' | 'programme' | 'pip' | null>(null)
+  const [menuSection, setMenuSection] = useState<'profil' | 'notifications' | 'parametres' | 'historique' | 'source' | 'annonces' | 'sondage' | 'programme' | 'pip' | 'restream' | null>(null)
 
   // ── Profile state ─────────────────────────────────────────────────────────
   const [userCreatedAt, setUserCreatedAt] = useState<string | null>(null)
@@ -258,7 +296,12 @@ export default function Home() {
   // ── Stream source ─────────────────────────────────────────────────────────
   const [streamUrl, setStreamUrl] = useState('')
   const [streamTitle, setStreamTitle] = useState('')
-  const [streamType, setStreamType] = useState<'youtube' | 'camera'>('youtube')
+  const [streamType, setStreamType] = useState<'youtube' | 'camera' | 'screen'>('youtube')
+  const [fallbackUrl, setFallbackUrl] = useState('')
+  const [live, setLive] = useState(false)
+  const fallbackUrlRef = useRef('')
+  const switchingSourceRef = useRef(false)
+  useEffect(() => { fallbackUrlRef.current = fallbackUrl }, [fallbackUrl])
   const [broadcasting, setBroadcasting] = useState(false)
   const cameraVideoRef = useRef<HTMLVideoElement | null>(null)
   const pcRef = useRef<RTCPeerConnection | null>(null)
@@ -277,10 +320,12 @@ export default function Home() {
 
   // ── Picture-in-Picture: admin camera overlaid on the YouTube video ─────────
   const [pipEnabled, setPipEnabled] = useState(false)
+  const [pipSwapped, setPipSwapped] = useState(false)
   const [pipStreamReady, setPipStreamReady] = useState(false)
   const [pipX, setPipX] = useState(72)
   const [pipY, setPipY] = useState(66)
   const [pipDragging, setPipDragging] = useState(false)
+  const [pipResizing, setPipResizing] = useState(false)
   const [pipW, setPipW] = useState(24)
   const pipWRef = useRef(24)
   const pipVideoRef = useRef<HTMLVideoElement | null>(null)
@@ -288,6 +333,7 @@ export default function Home() {
   const pipPosRef = useRef({ x: 72, y: 66 })
   const [viewerPipActive, setViewerPipActive] = useState(false)
   const viewerPipVideoRef = useRef<HTMLVideoElement | null>(null)
+  const adminPipVideoRef = useRef<HTMLVideoElement | null>(null)
   const viewerStreamRef = useRef<MediaStream | null>(null)
   const viewerWhipPcRef = useRef<RTCPeerConnection | null>(null)
   const [remoteViewers, setRemoteViewers] = useState<Array<{ uid: string; name: string; x: number; y: number; w: number }>>([])
@@ -411,8 +457,11 @@ export default function Home() {
           setStreamUrl(d.url ?? '')
           setStreamTitle(d.title ?? '')
           setStreamType(d.type ?? 'youtube')
+          setFallbackUrl(d.fallbackUrl ?? '')
+          setLive(!!d.live)
           if (typeof d.index === 'number') setCurrentIndex(d.index)
           setPipEnabled(!!d.pip)
+          setPipSwapped(!!d.pipSwapped)
           if (typeof d.pipX === 'number') { setPipX(d.pipX); pipPosRef.current.x = d.pipX }
           if (typeof d.pipY === 'number') { setPipY(d.pipY); pipPosRef.current.y = d.pipY }
           if (typeof d.pipW === 'number') { setPipW(d.pipW); pipWRef.current = d.pipW }
@@ -423,29 +472,86 @@ export default function Home() {
     return () => unsub()
   }, [])
 
-  // Viewer playback: when source is camera and we're NOT the broadcaster, play the HLS feed
+  // Viewer playback: WHEP (WebRTC ~temps réel) d'abord, fallback HLS si hors LAN
   useEffect(() => {
-    if (streamType !== 'camera' || broadcasting) return
+    if ((streamType !== 'camera' && streamType !== 'screen') || broadcasting) return
     const video = cameraVideoRef.current
     if (!video) return
     const src = '/cam2/index.m3u8'
     let hls: { destroy: () => void } | null = null
+    let pc: RTCPeerConnection | null = null
     let cancelled = false
+    let retry: ReturnType<typeof setTimeout> | null = null
+
+    async function startWhep(vid: HTMLVideoElement): Promise<boolean> {
+      try {
+        const p = new RTCPeerConnection()
+        pc = p
+        const stream = new MediaStream()
+        p.addTransceiver('video', { direction: 'recvonly' })
+        p.addTransceiver('audio', { direction: 'recvonly' })
+        p.ontrack = e => stream.addTrack(e.track)
+        await p.setLocalDescription(await p.createOffer())
+        await new Promise<void>(res => {
+          if (p.iceGatheringState === 'complete') { res(); return }
+          const fn = () => { if (p.iceGatheringState === 'complete') { p.removeEventListener('icegatheringstatechange', fn); res() } }
+          p.addEventListener('icegatheringstatechange', fn)
+          setTimeout(res, 2000)
+        })
+        if (cancelled) { p.close(); return false }
+        const resp = await fetch('/mediamtx/cam/whep', { method: 'POST', headers: { 'Content-Type': 'application/sdp' }, body: p.localDescription!.sdp })
+        if (!resp.ok) { p.close(); return false }
+        await p.setRemoteDescription({ type: 'answer', sdp: await resp.text() })
+        await new Promise<void>((res, rej) => {
+          if (p.connectionState === 'connected') { res(); return }
+          const fn = () => {
+            if (p.connectionState === 'connected') { p.removeEventListener('connectionstatechange', fn); res() }
+            if (['failed','closed','disconnected'].includes(p.connectionState)) { p.removeEventListener('connectionstatechange', fn); rej(new Error(p.connectionState)) }
+          }
+          p.addEventListener('connectionstatechange', fn)
+          setTimeout(() => rej(new Error('timeout')), 5000)
+        })
+        if (cancelled) { p.close(); return false }
+        vid.muted = true
+        vid.setAttribute('playsinline', '')
+        vid.srcObject = stream
+        await vid.play().catch(() => {})
+        return true
+      } catch { return false }
+    }
+
     ;(async () => {
+      if (await startWhep(video)) return
+      if (cancelled) return
+      // Fallback HLS (latence plus haute) si WHEP échoue (viewer hors LAN)
       if (video.canPlayType('application/vnd.apple.mpegurl')) {
         video.muted = true
         video.setAttribute('playsinline', '')
-        video.src = src // Safari / iOS native HLS
+        let tries = 0
+        const load = () => { if (cancelled) return; video.src = src; video.play().catch(() => {}) }
+        video.onerror = () => { if (!cancelled && tries++ < 30) retry = setTimeout(load, 1500) }
+        load()
       } else {
         const Hls = (await import('hls.js')).default
         if (cancelled || !Hls.isSupported()) return
         const h = new Hls({ lowLatencyMode: true, backBufferLength: 10 })
         h.loadSource(src)
         h.attachMedia(video)
+        h.on(Hls.Events.MANIFEST_PARSED, () => { video.play().catch(() => {}) })
         hls = h
       }
     })()
-    return () => { cancelled = true; hls?.destroy(); video.removeAttribute('src'); video.load() }
+
+    return () => {
+      cancelled = true
+      if (retry) clearTimeout(retry)
+      video.onerror = null
+      if (pc) { try { pc.close() } catch {} }
+      hls?.destroy()
+      if (video.srcObject) video.srcObject = null
+      video.removeAttribute('src')
+      video.load()
+    }
   }, [streamType, broadcasting])
 
   // PiP — admin: show own camera locally in the PiP box
@@ -455,6 +561,13 @@ export default function Home() {
     if (v && localStreamRef.current) { v.srcObject = localStreamRef.current; v.muted = true }
   }, [broadcasting, pipEnabled, ytVideoId])
 
+  // Admin: rattache le flux de diffusion au player principal (couvre le cas video montee apres startBroadcast)
+  useEffect(() => {
+    if (!broadcasting || (streamType !== 'camera' && streamType !== 'screen')) return
+    const v = cameraVideoRef.current
+    if (v && localStreamRef.current) { v.srcObject = localStreamRef.current; v.muted = true }
+  }, [broadcasting, streamType])
+
   useEffect(() => { pipEnabledRef.current = pipEnabled; if (!pipEnabled) setPipStreamReady(false) }, [pipEnabled])
 
   useEffect(() => {
@@ -462,6 +575,13 @@ export default function Home() {
       viewerPipVideoRef.current.srcObject = viewerStreamRef.current
     }
   }, [viewerPipActive, chatPopupOpen])
+
+  useEffect(() => {
+    if (viewerPipActive && adminPipVideoRef.current && viewerStreamRef.current) {
+      adminPipVideoRef.current.srcObject = viewerStreamRef.current
+      adminPipVideoRef.current.muted = true
+    }
+  }, [viewerPipActive, streamType])
 
   useEffect(() => {
     setRightPanel(chatPopupOpen ? 'cams' : 'chat')
@@ -593,18 +713,23 @@ export default function Home() {
       if (video.canPlayType('application/vnd.apple.mpegurl')) {
         video.muted = true
         video.setAttribute('playsinline', '')
-        video.src = src
-        video.load()
-        video.play().catch(() => {})
         pipLatencyRef.current = 2
-        video.addEventListener('canplay', () => {
+        const ready = () => {
           setPipStreamReady(true)
           const buf = video.buffered
           if (buf.length > 0) {
             const measured = buf.end(buf.length - 1) - video.currentTime + 0.5
             pipLatencyRef.current = Math.max(0.5, Math.min(measured, 10))
           }
-        }, { once: true })
+        }
+        video.addEventListener('canplay', ready)
+        video.addEventListener('loadeddata', ready)
+        video.addEventListener('playing', ready)
+        let tries = 0
+        const load = () => { if (cancelled) return; video.src = src; video.load(); video.play().catch(() => {}) }
+        video.onerror = () => { if (!cancelled && tries++ < 30) setTimeout(load, 1500) }
+        load()
+        setTimeout(() => { if (!cancelled) { setPipStreamReady(true); video.play().catch(() => {}) } }, 2500)
       } else {
         const Hls = (await import('hls.js')).default
         if (cancelled || !Hls.isSupported()) return
@@ -621,6 +746,7 @@ export default function Home() {
 
     return () => {
       cancelled = true
+      video.onerror = null
       whepPcRef.current?.close(); whepPcRef.current = null
       hls?.destroy()
       video.srcObject = null
@@ -962,28 +1088,64 @@ export default function Home() {
     setAdminUsers(prev => prev.map(u => u.uid === uid ? { ...u, role } : u))
   }
 
-  const saveStreamSource = async (url: string, title: string, type: 'youtube' | 'camera' = 'youtube') => {
+  const saveStreamSource = async (url: string, title: string, type: 'youtube' | 'camera' | 'screen' = 'youtube') => {
+    switchingSourceRef.current = true
+    if (broadcasting && type !== streamType) stopBroadcast()
     setStreamUrl(url)
     setStreamTitle(title)
     setStreamType(type)
+    if (type === 'youtube' && url) setFallbackUrl(url)
     setCurrentIndex(0)
     try {
-      await setDoc(doc(db, 'config', 'stream'), { url, title, type, index: 0, updatedAt: serverTimestamp() }, { merge: true })
+      await setDoc(doc(db, 'config', 'stream'), { url, title, type, index: 0, ...(type === 'youtube' && url ? { fallbackUrl: url } : {}), updatedAt: serverTimestamp() }, { merge: true })
     } catch (e) {
       console.error('saveStreamSource setDoc error:', e)
     }
+    setTimeout(() => { switchingSourceRef.current = false }, 1200)
   }
 
-  const broadcastNotify = (title: string, body: string) => {
-    fetch('/api/notify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title, body, type: 'stream_live' }),
-    }).catch(() => {})
+  // Fallback : revenir à l'URL YouTube mémorisée quand une diffusion s'arrête
+  const fallbackToYoutube = () => {
+    if (fallbackUrlRef.current) saveStreamSource(fallbackUrlRef.current, streamTitle, 'youtube')
+  }
+
+  const broadcastNotify = async (title: string, body: string) => {
+    try {
+      const res = await fetch('/api/notify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, body, type: 'stream_live' }),
+      })
+      const d = await res.json()
+      alert(`Notification envoyee : ${d.inApp ?? 0} membres (in-app), ${d.sent ?? 0} push`)
+    } catch {
+      alert('Echec de l.envoi de la notification')
+    }
   }
 
   const saveAnnouncements = async (messages: string[], interval: number) => {
     await setDoc(doc(db, 'config', 'announcements'), { messages, interval, updatedAt: serverTimestamp() })
+  }
+
+  const saveRestream = async (platform: 'tiktok' | 'youtube' | 'facebook' | 'x' | 'luxmedia', enabled: boolean) => {
+    await setDoc(doc(db, 'config', 'restream'), { [platform]: enabled, updatedAt: serverTimestamp() }, { merge: true })
+  }
+
+  const loadRestreamKeys = async () => {
+    try {
+      const res = await fetch('/api/restream/keys', { headers: { 'Authorization': `Bearer ${authTokenRef.current}` } })
+      if (res.ok) setRestreamKeys(await res.json())
+    } catch {}
+  }
+
+  const saveRestreamKeys = async (payload: Record<string, { url?: string; key?: string }>) => {
+    const res = await fetch('/api/restream/keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authTokenRef.current}` },
+      body: JSON.stringify(payload),
+    })
+    if (res.ok) setRestreamKeys(await res.json())
+    else alert('Erreur sauvegarde clés (auth admin requise ou serviceAccount.json manquant)')
   }
 
   const votePoll = async (optionIndex: number) => {
@@ -1016,8 +1178,8 @@ export default function Home() {
     await updateDoc(doc(db, 'users', uid), { banned: false })
   }
 
-  const saveSchedule = async (date: string, title: string) => {
-    await setDoc(doc(db, 'config', 'schedule'), { active: !!date, date, title, updatedAt: serverTimestamp() })
+  const saveSchedule = async (lines: { text: string; format: string }[]) => {
+    await setDoc(doc(db, 'config', 'schedule'), { active: lines.length > 0, lines, updatedAt: serverTimestamp() })
   }
 
   const startViewerResize = (e: React.MouseEvent | React.TouchEvent, uid: string, currentW: number) => {
@@ -1144,14 +1306,23 @@ export default function Home() {
     localStreamRef.current?.getTracks().forEach(t => t.stop())
     localStreamRef.current = null
     if (cameraVideoRef.current) cameraVideoRef.current.srcObject = null
+    stopViewerPip()
     setBroadcasting(false)
+    setDoc(doc(db, 'config', 'stream'), { live: false, updatedAt: serverTimestamp() }, { merge: true }).catch(() => {})
   }
 
   // Publish this device's camera to MediaMTX via WHIP (admin only)
-  const startBroadcast = async () => {
+  const startBroadcast = async (mode: 'camera' | 'screen' = streamType === 'screen' ? 'screen' : 'camera') => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+      const stream = mode === 'screen'
+        ? await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
+        : await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
       localStreamRef.current = stream
+      const vt0 = stream.getVideoTracks()[0]
+      if (vt0) vt0.onended = () => {
+        stopBroadcast()
+        if (!switchingSourceRef.current && fallbackUrlRef.current) fallbackToYoutube()
+      }
       const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] })
       pcRef.current = pc
       stream.getTracks().forEach(t => pc.addTrack(t, stream))
@@ -1183,6 +1354,7 @@ export default function Home() {
       if (!res.ok) throw new Error('WHIP HTTP ' + res.status)
       await pc.setRemoteDescription({ type: 'answer', sdp: await res.text() })
       setBroadcasting(true)
+      setDoc(doc(db, 'config', 'stream'), { live: true, updatedAt: serverTimestamp() }, { merge: true }).catch(() => {})
       if (cameraVideoRef.current) { cameraVideoRef.current.srcObject = stream; cameraVideoRef.current.muted = true }
     } catch (e) {
       console.error('broadcast failed', e)
@@ -1194,6 +1366,8 @@ export default function Home() {
   const writePip = (fields: Record<string, unknown>) => {
     setDoc(doc(db, 'config', 'stream'), { ...fields, updatedAt: serverTimestamp() }, { merge: true }).catch(() => {})
   }
+
+  const toggleSwap = () => { const nv = !pipSwapped; setPipSwapped(nv); writePip({ pipSwapped: nv }) }
 
   const togglePip = async (on: boolean) => {
     if (on) {
@@ -1234,8 +1408,10 @@ export default function Home() {
     const mm = (ev: MouseEvent) => move(ev.clientX)
     const tm = (ev: TouchEvent) => { if (ev.touches[0]) move(ev.touches[0].clientX) }
     isResizingRef.current = true
+    setPipResizing(true)
     const stop = () => {
       isResizingRef.current = false
+      setPipResizing(false)
       window.removeEventListener('mousemove', mm)
       window.removeEventListener('touchmove', tm)
       window.removeEventListener('mouseup', stop)
@@ -1527,7 +1703,7 @@ export default function Home() {
         {/* Main content */}
         <div className='flex flex-col shrink-0 lg:flex-1 lg:min-h-0 overflow-hidden p-2 sm:p-3 gap-2 sm:gap-3'>
           <div ref={playerBoxRef} className='relative border-2 border-[#00ff41] aspect-video lg:aspect-auto lg:flex-1 bg-black overflow-hidden'>
-            {streamType === 'camera' ? (
+            {streamType === 'camera' || streamType === 'screen' ? (
               <>
                 <video
                   ref={cameraVideoRef}
@@ -1536,17 +1712,34 @@ export default function Home() {
                   playsInline
                   className='w-full h-full object-contain bg-black'
                 />
+                {!(live || broadcasting) && (
+                  <div className='absolute inset-0 flex items-center justify-center bg-black z-10'>
+                    {schedule?.active && schedule.lines?.length ? (
+                      <div className='text-center px-4'>
+                        <div className='text-[10px] tracking-widest text-[#00ff41]/40 mb-3'>PROGRAMME</div>
+                        <ScheduleLines lines={schedule.lines} />
+                      </div>
+                    ) : (
+                      <div className='text-center'>
+                        <div className='text-5xl opacity-20'>&#9654;</div>
+                        <p className='text-[#00ff41]/30 text-xs tracking-widest mt-2'>{isHost ? 'Pret a diffuser - clique DEMARRER' : 'Bientot en direct'}</p>
+                      </div>
+                    )}
+                  </div>
+                )}
                 <div className='absolute top-2 left-3 flex items-center gap-2'>
                   <span className={`w-2 h-2 rounded-full ${broadcasting ? 'bg-[#ff4141] animate-pulse' : 'bg-[#00ff41]/30'}`} />
-                  <span className='text-xs tracking-widest'>{broadcasting ? 'EN DIRECT · CAMERA' : 'CAMERA'}</span>
+                  <span className='text-[18px] tracking-widest'>{(broadcasting ? 'EN DIRECT · ' : '') + (streamType === 'screen' ? 'ECRAN' : 'CAMERA')}</span>
                 </div>
                 {viewerCount !== null && (
-                  <div className='absolute top-2 right-3 text-[10px] tracking-widest text-[#00ff41]/55 pointer-events-none'>{viewerCount} 👁</div>
+                  <div className='absolute top-2 right-3 text-[15px] tracking-widest text-[#00ff41]/55 pointer-events-none'>{viewerCount} 👁</div>
                 )}
               </>
             ) : ytVideoId ? (
               <>
-                <div key={ytVideoId ?? ''} ref={ytWrapRef} className='w-full h-full' />
+                <div key={ytVideoId ?? ''} ref={ytWrapRef}
+                  className={pipSwapped && pipEnabled ? 'absolute z-20 border border-[#00ff41]/60 bg-black overflow-hidden shadow-lg pointer-events-none' : 'w-full h-full'}
+                  style={pipSwapped && pipEnabled ? { left: `${pipX}%`, top: `${pipY}%`, width: `${pipW}%`, aspectRatio: '16 / 9' } : undefined} />
                 {/* YouTube chrome mask via box-shadow — renders above iframe in compositor */}
                 {!isHost && (
                   <div
@@ -1579,9 +1772,9 @@ export default function Home() {
                   </div>
                 )}
                 <div className='absolute top-2 right-3 flex flex-col items-end gap-1 pointer-events-none'>
-                  <span className='text-[10px] tracking-widest text-[#00ff41]/45'>{isHost ? '● CONTROLE ADMIN' : 'SYNC ADMIN'}</span>
+                  <span className='text-[19px] tracking-widest text-[#00ff41]/45'>{isHost ? '● CONTROLE ADMIN' : 'SYNC ADMIN'}</span>
                   {viewerCount !== null && (
-                    <span className='text-[10px] tracking-widest text-[#00ff41]/55'>{viewerCount} 👁</span>
+                    <span className='text-[19px] tracking-widest text-[#00ff41]/55'>{viewerCount} 👁</span>
                   )}
                 </div>
                 {playlist.length > 1 && (
@@ -1603,7 +1796,8 @@ export default function Home() {
               <iframe
                 src={getEmbedUrl(streamUrl)!}
                 className='w-full h-full'
-                allow='autoplay; fullscreen; encrypted-media'
+                allow='accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share'
+                referrerPolicy='strict-origin-when-cross-origin'
                 allowFullScreen
                 style={{ border: 'none' }}
               />
@@ -1611,22 +1805,16 @@ export default function Home() {
               <>
                 <div className='absolute top-2 left-3 flex items-center gap-2'>
                   <span className='w-2 h-2 rounded-full bg-[#00ff41] animate-pulse' />
-                  <span className='text-xs tracking-widest'>EN DIRECT</span>
+                  <span className='text-[18px] tracking-widest'>EN DIRECT</span>
                 </div>
                 {viewerCount !== null && (
-                  <div className='absolute top-2 right-3 text-xs text-[#00ff41]/50'>{viewerCount} SPECTATEUR{viewerCount !== 1 ? 'S' : ''}</div>
+                  <div className='absolute top-2 right-3 text-[18px] text-[#00ff41]/50'>{viewerCount} SPECTATEUR{viewerCount !== 1 ? 'S' : ''}</div>
                 )}
                 <div className='absolute inset-0 flex items-center justify-center'>
-                  {schedule?.active && schedule.date ? (
+                  {schedule?.active && schedule.lines?.length ? (
                     <div className='text-center px-4'>
-                      <div className='text-[10px] tracking-widest text-[#00ff41]/40 mb-3'>PROCHAINE SESSION</div>
-                      <div className='text-2xl font-bold tracking-wide capitalize'>
-                        {new Date(schedule.date).toLocaleDateString('fr-CA', { weekday: 'long', day: 'numeric', month: 'long' })}
-                      </div>
-                      <div className='text-lg text-[#00ff41]/70 mt-1'>
-                        {new Date(schedule.date).toLocaleTimeString('fr-CA', { hour: '2-digit', minute: '2-digit' })}
-                      </div>
-                      {schedule.title && <div className='text-[11px] text-[#00ff41]/45 mt-3 tracking-wide'>{schedule.title}</div>}
+                      <div className='text-[10px] tracking-widest text-[#00ff41]/40 mb-3'>PROGRAMME</div>
+                      <ScheduleLines lines={schedule.lines} />
                     </div>
                   ) : (
                     <div className='text-center'>
@@ -1649,16 +1837,30 @@ export default function Home() {
             {/* PiP — admin camera overlaid on the YouTube video, draggable by admin */}
             {ytVideoId && pipEnabled && (
               <div
-                className='absolute z-20 border border-[#00ff41]/60 bg-black overflow-hidden shadow-lg'
-                style={{ left: `${pipX}%`, top: `${pipY}%`, width: `${pipW}%`, aspectRatio: '16 / 9', cursor: isHost ? 'move' : 'default' }}
-                onMouseDown={isHost ? startPipDrag : undefined}
-                onTouchStart={isHost ? startPipDrag : undefined}
+                className={pipSwapped ? 'absolute inset-0 bg-black overflow-hidden' : 'absolute z-20 border border-[#00ff41]/60 bg-black overflow-hidden shadow-lg'}
+                style={pipSwapped ? undefined : { left: `${pipX}%`, top: `${pipY}%`, width: `${pipW}%`, aspectRatio: '16 / 9', cursor: isHost ? 'move' : 'default' }}
+                onMouseDown={!pipSwapped && isHost ? startPipDrag : undefined}
+                onTouchStart={!pipSwapped && isHost ? startPipDrag : undefined}
               >
-                <video ref={pipVideoRef} autoPlay muted={isHost ? true : !viewerUnmuted} playsInline className={'w-full h-full object-cover pointer-events-none transition-opacity duration-500' + (isHost || pipStreamReady ? '' : ' opacity-0')} />
-                {isHost && <div className='absolute top-0.5 left-1 text-[8px] text-[#00ff41]/80 tracking-widest pointer-events-none'>PIP · GLISSER</div>}
-                {isHost && <div data-resize='true' className='absolute bottom-0 right-0 w-5 h-5 cursor-se-resize z-20 flex items-end justify-end p-0.5' style={{background:'transparent'}} onMouseDown={startPipResize} onTouchStart={startPipResize}><span style={{width:'10px',height:'10px',borderRight:'2px solid rgba(0,255,65,0.8)',borderBottom:'2px solid rgba(0,255,65,0.8)',display:'block',pointerEvents:'none'}} /></div>}
+                <video ref={pipVideoRef} autoPlay muted playsInline className={'w-full h-full object-cover pointer-events-none transition-opacity duration-500' + (isHost || pipStreamReady ? '' : ' opacity-0')} />
+                {!pipSwapped && isHost && <div className='absolute top-0.5 left-1 text-[8px] text-[#00ff41]/80 tracking-widest pointer-events-none'>PIP · GLISSER</div>}
+                {!pipSwapped && isHost && <div data-resize='true' className='absolute bottom-0 right-0 w-5 h-5 cursor-se-resize z-20 flex items-end justify-end p-0.5' style={{background:'transparent'}} onMouseDown={startPipResize} onTouchStart={startPipResize}><span style={{width:'10px',height:'10px',borderRight:'2px solid rgba(0,255,65,0.8)',borderBottom:'2px solid rgba(0,255,65,0.8)',display:'block',pointerEvents:'none'}} /></div>}
               </div>
             )}
+            {viewerPipActive && isHost && streamType === 'screen' && (() => {
+              const myPos = remoteViewers.find(v => v.uid === user?.uid)
+              return (
+                <div className='absolute z-20 border border-[#00ff41]/60 bg-black overflow-hidden shadow-lg'
+                  style={{ left: `${myPos?.x ?? 70}%`, top: `${myPos?.y ?? 70}%`, width: `${pipW}%`, aspectRatio: '16 / 9', cursor: 'move' }}
+                  onMouseDown={e => { if (user) startViewerDrag(e, user.uid) }}
+                  onTouchStart={e => { if (user) startViewerDrag(e, user.uid) }}
+                >
+                  <video ref={adminPipVideoRef} autoPlay muted playsInline className='w-full h-full object-cover pointer-events-none' />
+                  <div className='absolute top-0.5 left-1 text-[8px] text-[#00ff41]/80 tracking-widest pointer-events-none'>MA CAM · GLISSER</div>
+                  <button onMouseDown={e => e.stopPropagation()} onClick={stopViewerPip} className='absolute top-1 right-1 text-[10px] text-[#ff4141]/80 hover:text-[#ff4141] bg-black/60 px-1 leading-none z-30'>✕</button>
+                </div>
+              )
+            })()}
             {/* Remote viewer streams — dans les carrés, pas en PiP */}
             {false && remoteViewers.filter(v => v.uid !== user?.uid).map(v => (
               <div
@@ -1675,7 +1877,7 @@ export default function Home() {
             ))}
 
             {/* drag shield: stops the YouTube iframe from swallowing mouse events while dragging */}
-            {pipDragging && <div className='absolute inset-0 z-30' style={{ cursor: 'move' }} />}
+            {(pipDragging || pipResizing) && <div className='absolute inset-0 z-30' style={{ cursor: pipResizing ? 'se-resize' : 'move' }} />}
             {viewerDragUid && <div className='absolute inset-0 z-30' style={{ cursor: 'move' }} />}
 
             {/* Viewer self-cam — dans les carrés, pas en PiP */}
@@ -1847,6 +2049,7 @@ export default function Home() {
             streamUrl={streamUrl}
             streamTitle={streamTitle}
             streamType={streamType}
+            fallbackUrl={fallbackUrl}
             saveStreamSource={saveStreamSource}
             broadcastNotify={broadcastNotify}
             broadcasting={broadcasting}
@@ -1854,8 +2057,18 @@ export default function Home() {
             stopBroadcast={stopBroadcast}
             pipEnabled={pipEnabled}
             togglePip={togglePip}
+            pipSwapped={pipSwapped}
+            toggleSwap={toggleSwap}
+            viewerPipActive={viewerPipActive}
+            startViewerPip={startViewerPip}
+            stopViewerPip={stopViewerPip}
             announcements={announcements}
             saveAnnouncements={saveAnnouncements}
+            restream={restream}
+            saveRestream={saveRestream}
+            restreamKeys={restreamKeys}
+            loadRestreamKeys={loadRestreamKeys}
+            saveRestreamKeys={saveRestreamKeys}
             poll={poll}
             createPoll={createPoll}
             closePoll={closePoll}

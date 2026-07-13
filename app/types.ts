@@ -45,8 +45,7 @@ export type Poll = {
 
 export type Schedule = {
   active: boolean
-  date: string
-  title: string
+  lines: { text: string; format: string }[]
 }
 
 export type AppNotification = {

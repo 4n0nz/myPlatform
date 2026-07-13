@@ -7,7 +7,7 @@ import type {
   Crew, CrewMember, PublicCrew, AdminUser, Poll, Schedule, AppNotification,
 } from '../types'
 
-type MenuSection = 'profil' | 'notifications' | 'parametres' | 'historique' | 'source' | 'annonces' | 'sondage' | 'programme' | 'pip'
+type MenuSection = 'profil' | 'notifications' | 'parametres' | 'historique' | 'source' | 'annonces' | 'sondage' | 'programme' | 'pip' | 'restream'
 type RightTab = 'menu' | 'amis' | 'crew'
 
 type Props = {
@@ -76,21 +76,32 @@ type Props = {
 
   streamUrl: string
   streamTitle: string
-  streamType: 'youtube' | 'camera'
-  saveStreamSource: (url: string, title: string, type: 'youtube' | 'camera') => void
+  streamType: 'youtube' | 'camera' | 'screen'
+  fallbackUrl: string
+  saveStreamSource: (url: string, title: string, type: 'youtube' | 'camera' | 'screen') => void
   broadcastNotify: (title: string, body: string) => void
   broadcasting: boolean
-  startBroadcast: () => void
+  startBroadcast: (mode?: 'camera' | 'screen') => void
   stopBroadcast: () => void
   pipEnabled: boolean
   togglePip: (on: boolean) => void
+  pipSwapped: boolean
+  toggleSwap: () => void
+  viewerPipActive: boolean
+  startViewerPip: () => void
+  stopViewerPip: () => void
   announcements: { messages: string[]; interval: number } | null
   saveAnnouncements: (messages: string[], interval: number) => void
+  restream: { tiktok: boolean; youtube: boolean; facebook: boolean; x: boolean; luxmedia: boolean }
+  saveRestream: (platform: 'tiktok' | 'youtube' | 'facebook' | 'x' | 'luxmedia', enabled: boolean) => void
+  restreamKeys: Record<'tiktok' | 'youtube' | 'facebook' | 'x' | 'luxmedia', { url: string; keySet: boolean; keyHint: string }> | null
+  loadRestreamKeys: () => void
+  saveRestreamKeys: (payload: Record<string, { url?: string; key?: string }>) => Promise<void>
   poll: Poll | null
   createPoll: (question: string, options: string[]) => void
   closePoll: () => void
   schedule: Schedule | null
-  saveSchedule: (date: string, title: string) => void
+  saveSchedule: (lines: { text: string; format: string }[]) => void
   muteChatUser: (uid: string, minutes: number) => void
   unmuteUser: (uid: string) => void
   banChatUser: (uid: string) => void
@@ -112,10 +123,14 @@ export default function RightDrawer({
   acceptFriendReq, declineFriendReq,
   showCrewCreate, setShowCrewCreate, crewNameInput, setCrewNameInput,
   crewTagInput, setCrewTagInput, createCrew, requestJoinCrew, acceptCrewMember, leaveCrew,
-  streamUrl, streamTitle, streamType, saveStreamSource, broadcastNotify,
+  streamUrl, streamTitle, streamType, fallbackUrl, saveStreamSource, broadcastNotify,
   broadcasting, startBroadcast, stopBroadcast,
   pipEnabled, togglePip,
+  pipSwapped, toggleSwap,
+  viewerPipActive, startViewerPip, stopViewerPip,
   announcements, saveAnnouncements,
+  restream, saveRestream,
+  restreamKeys, loadRestreamKeys, saveRestreamKeys,
   poll, createPoll, closePoll,
   schedule, saveSchedule,
   muteChatUser, unmuteUser, banChatUser, unbanUser,
@@ -124,17 +139,29 @@ export default function RightDrawer({
   const [annMsgs, setAnnMsgs] = useState<string[]>(announcements?.messages ?? [])
   const [annInterval, setAnnInterval] = useState(announcements?.interval ?? 300)
   const [annInput, setAnnInput] = useState('')
+  const [keyForm, setKeyForm] = useState<Record<'tiktok' | 'youtube' | 'facebook' | 'x' | 'luxmedia', { url: string; key: string }>>({
+    tiktok: { url: '', key: '' }, youtube: { url: '', key: '' }, facebook: { url: '', key: '' }, x: { url: '', key: '' }, luxmedia: { url: '', key: '' },
+  })
+  const [keysSaving, setKeysSaving] = useState(false)
   const [pollQuestion, setPollQuestion] = useState('')
   const [pollOptions, setPollOptions] = useState(['', ''])
-  const [scheduleDate, setScheduleDate] = useState('')
-  const [scheduleTitle, setScheduleTitle] = useState('')
+  const [scheduleLines, setScheduleLines] = useState<{ text: string; format: string }[]>([{ text: '', format: 'titre' }])
   // Sync local state when Firestore data arrives
   useEffect(() => {
     setAnnMsgs(announcements?.messages ?? [])
     setAnnInterval(announcements?.interval ?? 5)
   }, [announcements])
-  const [sourceTitleInput, setSourceTitleInput] = useState(streamTitle)
-  const [sourceType, setSourceType] = useState<'youtube' | 'camera'>(streamType)
+
+  useEffect(() => {
+    if (restreamKeys) setKeyForm({
+      tiktok: { url: restreamKeys.tiktok.url, key: '' },
+      youtube: { url: restreamKeys.youtube.url, key: '' },
+      facebook: { url: restreamKeys.facebook.url, key: '' },
+      x: { url: restreamKeys.x.url, key: '' },
+      luxmedia: { url: restreamKeys.luxmedia.url, key: '' },
+    })
+  }, [restreamKeys])
+  const [sourceType, setSourceType] = useState<'youtube' | 'camera' | 'screen'>(streamType)
   const isAdmin = userRole === 'admin' || ADMIN_EMAILS.includes(user?.email ?? '')
 
   const Toggle = ({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) => (
@@ -148,11 +175,10 @@ export default function RightDrawer({
   )
 
   useEffect(() => { setSourceUrlInput(streamUrl) }, [streamUrl])
-  useEffect(() => { setSourceTitleInput(streamTitle) }, [streamTitle])
+  useEffect(() => { if (sourceType === 'youtube') setSourceUrlInput(fallbackUrl) }, [sourceType, fallbackUrl])
   useEffect(() => { setSourceType(streamType) }, [streamType])
   useEffect(() => {
-    if (schedule?.date) setScheduleDate(schedule.date)
-    if (schedule?.title !== undefined) setScheduleTitle(schedule.title)
+    if (schedule?.lines?.length) setScheduleLines((schedule.lines as unknown[]).map(l => typeof l === 'string' ? { text: l, format: 'paragraphe' } : { text: (l as { text?: string }).text ?? '', format: (l as { format?: string }).format ?? 'paragraphe' }))
   }, [schedule])
   const unreadNotifs = appNotifications.filter(n => !n.read).length
   const totalNotifBadge = incomingFriendReqs.length + (crewBadge ? (myCrew?.pending.length ?? 0) : 0) + unreadNotifs
@@ -501,7 +527,7 @@ export default function RightDrawer({
                       <label className='text-[9px] text-[#00ff41]/40 tracking-widest block mb-1.5'>TYPE</label>
                       <div className='space-y-1.5'>
                         <button
-                          onClick={() => setSourceType('youtube')}
+                          onClick={() => { setSourceType('youtube'); if (streamType !== 'youtube') { if (pipEnabled) togglePip(false); else if (broadcasting) stopBroadcast() } }}
                           className={`w-full flex items-center gap-2 px-2 py-1.5 border text-[11px] tracking-wide transition-all ${sourceType === 'youtube' ? 'border-[#00ff41]/60 text-[#00ff41] bg-[#00ff41]/10' : 'border-[#00ff41]/20 text-[#00ff41]/50 hover:border-[#00ff41]/40'}`}
                         >
                           <span className='text-[12px] leading-none'>{sourceType === 'youtube' ? '●' : '○'}</span>
@@ -509,24 +535,23 @@ export default function RightDrawer({
                         </button>
                         {isAdmin && (
                           <button
-                            onClick={() => setSourceType('camera')}
+                            onClick={() => { setSourceType('camera'); if (streamType !== 'camera') { if (pipEnabled) togglePip(false); saveStreamSource('', streamTitle, 'camera') } }}
                             className={`w-full flex items-center gap-2 px-2 py-1.5 border text-[11px] tracking-wide transition-all ${sourceType === 'camera' ? 'border-[#00ff41]/60 text-[#00ff41] bg-[#00ff41]/10' : 'border-[#00ff41]/20 text-[#00ff41]/50 hover:border-[#00ff41]/40'}`}
                           >
                             <span className='text-[12px] leading-none'>{sourceType === 'camera' ? '●' : '○'}</span>
                             Camera de l&apos;appareil
                           </button>
                         )}
+                        {isAdmin && (
+                          <button
+                            onClick={() => { setSourceType('screen'); if (streamType !== 'screen') { if (pipEnabled) togglePip(false); saveStreamSource('', streamTitle, 'screen') } }}
+                            className={`w-full flex items-center gap-2 px-2 py-1.5 border text-[11px] tracking-wide transition-all ${sourceType === 'screen' ? 'border-[#00ff41]/60 text-[#00ff41] bg-[#00ff41]/10' : 'border-[#00ff41]/20 text-[#00ff41]/50 hover:border-[#00ff41]/40'}`}
+                          >
+                            <span className='text-[12px] leading-none'>{sourceType === 'screen' ? '●' : '○'}</span>
+                            Partage d&apos;ecran
+                          </button>
+                        )}
                       </div>
-                    </div>
-
-                    <div>
-                      <label className='text-[9px] text-[#00ff41]/40 tracking-widest block mb-1.5'>TITRE</label>
-                      <input
-                        value={sourceTitleInput}
-                        onChange={e => setSourceTitleInput(e.target.value)}
-                        placeholder='Intelligence Artificielle : Menace ou Opportunite ?'
-                        className='w-full bg-transparent border border-[#00ff41]/30 px-2 py-1.5 text-[11px] text-[#00ff41] placeholder-[#00ff41]/20 outline-none focus:border-[#00ff41]/60'
-                      />
                     </div>
 
                     {sourceType === 'youtube' && (
@@ -540,15 +565,27 @@ export default function RightDrawer({
                           className='w-full bg-transparent border border-[#00ff41]/30 px-2 py-1.5 text-[11px] text-[#00ff41] placeholder-[#00ff41]/20 outline-none focus:border-[#00ff41]/60 resize-none leading-relaxed font-mono'
                         />
                         <p className='text-[9px] text-[#00ff41]/25 mt-1'>YouTube, Twitch ou URL directe. Plusieurs liens YouTube (un par ligne) = playlist avec boutons ⏮ ⏭</p>
+                        {isAdmin && (
+                          <button
+                            onClick={() => togglePip(!pipEnabled)}
+                            className={`w-full mt-2 py-2 text-[10px] border tracking-widest transition-all ${pipEnabled ? 'border-[#ff4141]/40 text-[#ff4141]/70 hover:bg-[#ff4141]/10' : 'border-[#00ff41]/40 text-[#00ff41]/70 hover:bg-[#00ff41]/10'}`}
+                          >{pipEnabled ? '✕ RETIRER MA CAMERA (PIP)' : '➕ AJOUTER MA CAMERA (PIP)'}</button>
+                        )}
+                        {isAdmin && pipEnabled && (
+                          <button
+                            onClick={toggleSwap}
+                            className={`w-full mt-1 py-2 text-[10px] border tracking-widest transition-all ${pipSwapped ? 'border-[#00ff41]/60 text-[#00ff41] bg-[#00ff41]/10' : 'border-[#00ff41]/40 text-[#00ff41]/70 hover:bg-[#00ff41]/10'}`}
+                          >⇄ INVERSER FOND / PIP</button>
+                        )}
                       </div>
                     )}
 
 
-                    {sourceType === 'camera' && (
+                    {(sourceType === 'camera' || sourceType === 'screen') && (
                       <div className='space-y-2'>
                         <div className='border border-[#00ff41]/15 p-2 rounded-sm'>
                           <p className='text-[10px] text-[#00ff41]/55 leading-relaxed'>
-                            Diffuse la camera de cet appareil vers tous les viewers via le serveur media. Applique d&apos;abord, puis demarre.
+                            {sourceType === 'screen' ? "Partage l'ecran de cet appareil" : 'Diffuse la camera de cet appareil'} vers tous les viewers via le serveur media. Applique d&apos;abord, puis demarre.
                           </p>
                           <p className='text-[9px] text-[#00ff41]/35 mt-1.5 tracking-widest'>
                             ETAT : {broadcasting ? '🔴 EN DIRECT' : '○ HORS LIGNE'}
@@ -556,7 +593,7 @@ export default function RightDrawer({
                         </div>
                         {!broadcasting ? (
                           <button
-                            onClick={startBroadcast}
+                            onClick={() => { saveStreamSource('', streamTitle, sourceType); startBroadcast(sourceType === 'screen' ? 'screen' : 'camera') }}
                             className='w-full py-2 text-[10px] bg-[#ff4141]/15 border border-[#ff4141]/50 text-[#ff4141] hover:bg-[#ff4141]/25 transition-all tracking-widest'
                           >● DEMARRER LA DIFFUSION</button>
                         ) : (
@@ -564,6 +601,12 @@ export default function RightDrawer({
                             onClick={stopBroadcast}
                             className='w-full py-2 text-[10px] bg-[#00ff41]/10 border border-[#00ff41]/40 text-[#00ff41]/80 hover:bg-[#00ff41]/20 transition-all tracking-widest'
                           >■ ARRETER LA DIFFUSION</button>
+                        )}
+                        {broadcasting && sourceType === 'screen' && (
+                          <button
+                            onClick={() => viewerPipActive ? stopViewerPip() : startViewerPip()}
+                            className={`w-full py-2 text-[10px] border tracking-widest transition-all ${viewerPipActive ? 'border-[#ff4141]/40 text-[#ff4141]/70 hover:bg-[#ff4141]/10' : 'border-[#00ff41]/40 text-[#00ff41]/70 hover:bg-[#00ff41]/10'}`}
+                          >{viewerPipActive ? '✕ RETIRER MA CAMERA (PIP)' : '➕ AJOUTER MA CAMERA (PIP)'}</button>
                         )}
                       </div>
                     )}
@@ -575,38 +618,24 @@ export default function RightDrawer({
                       </div>
                     )}
 
-                    <button
-                      onClick={() => saveStreamSource(sourceType === 'camera' ? '' : sourceUrlInput.trim(), sourceTitleInput.trim(), sourceType)}
-                      className='w-full py-2 text-[10px] bg-[#00ff41]/10 border border-[#00ff41]/40 text-[#00ff41]/80 hover:text-[#00ff41] hover:bg-[#00ff41]/20 transition-all tracking-widest'
-                    >✓ APPLIQUER</button>
+                    {sourceType === 'youtube' && (
+                      <button
+                        onClick={() => saveStreamSource(sourceUrlInput.trim(), streamTitle, sourceType)}
+                        className='w-full py-2 text-[10px] bg-[#00ff41]/10 border border-[#00ff41]/40 text-[#00ff41]/80 hover:text-[#00ff41] hover:bg-[#00ff41]/20 transition-all tracking-widest'
+                      >✓ APPLIQUER</button>
+                    )}
 
                     {streamUrl && (
                       <button
-                        onClick={() => broadcastNotify('🔴 RoshDynamics est EN DIRECT', sourceTitleInput.trim() || streamTitle || 'Le stream vient de démarrer')}
+                        onClick={() => broadcastNotify('🔴 RoshDynamics est EN DIRECT', streamTitle || 'Le stream vient de démarrer')}
                         className='w-full py-2 text-[10px] border border-[#00ff41]/25 text-[#00ff41]/50 hover:text-[#00ff41]/80 hover:bg-[#00ff41]/5 transition-all tracking-widest'
                       >🔔 NOTIFIER LES MEMBRES</button>
                     )}
 
                     <button
-                      onClick={() => { saveStreamSource('', '', 'youtube'); setSourceUrlInput(''); setSourceTitleInput(''); setSourceType('youtube') }}
+                      onClick={() => { saveStreamSource('', '', 'youtube'); setSourceUrlInput(''); setSourceType('youtube') }}
                       className='w-full py-1.5 text-[9px] text-[#ff4141]/40 hover:text-[#ff4141] transition-colors tracking-widest'
                     >Retirer la source</button>
-                  </div>
-                )}
-
-                {/* PIP */}
-                {menuSection === 'pip' && (
-                  <div className='px-3 py-4 space-y-4'>
-                    <div className='text-[9px] text-[#00ff41]/35 tracking-widest'>PIP — CAMERA EN VIGNETTE</div>
-                    <div className='border border-[#00ff41]/15 p-2 rounded-sm space-y-2'>
-                      <p className='text-[10px] text-[#00ff41]/55 leading-relaxed'>
-                        Superpose ta camera en vignette sur la video. Glisse-la sur le lecteur pour la positionner.
-                      </p>
-                      <button
-                        onClick={() => togglePip(!pipEnabled)}
-                        className={`w-full py-2 text-[10px] tracking-widest transition-all border ${pipEnabled ? 'bg-[#ff4141]/15 border-[#ff4141]/50 text-[#ff4141] hover:bg-[#ff4141]/25' : 'bg-[#00ff41]/10 border-[#00ff41]/40 text-[#00ff41]/80 hover:bg-[#00ff41]/20'}`}
-                      >{pipEnabled ? '■ RETIRER LE PIP' : '+ AJOUTER PIP (CAMERA)'}</button>
-                    </div>
                   </div>
                 )}
 
@@ -701,6 +730,63 @@ Sous-titre (ligne 2)'
                   </div>
                 )}
 
+                {/* RESTREAM */}
+                {menuSection === 'restream' && (
+                  <div className='px-2 py-2 flex flex-col gap-3'>
+                    <div className='text-[9px] text-[#00ff41]/35 tracking-widest px-1'>DIFFUSION MULTI-PLATEFORME</div>
+                    {([
+                      ['tiktok', 'TikTok', (
+                        <svg viewBox='0 0 24 24' width='18' height='18'><path fill='#fff' d='M16.6 5.8a4.8 4.8 0 0 1-1-.9 4.6 4.6 0 0 1-1.1-2.7h-3.3v13.2a2.8 2.8 0 1 1-2-2.7V9.3a6.1 6.1 0 1 0 5.3 6V9a7.9 7.9 0 0 0 4.6 1.5V7.2a4.6 4.6 0 0 1-2.5-1.4z'/></svg>
+                      )],
+                      ['youtube', 'YouTube', (
+                        <svg viewBox='0 0 24 24' width='20' height='20'><path fill='#FF0000' d='M23 7.5a3 3 0 0 0-2.1-2.1C19 5 12 5 12 5s-7 0-8.9.4A3 3 0 0 0 1 7.5 31 31 0 0 0 .6 12 31 31 0 0 0 1 16.5a3 3 0 0 0 2.1 2.1C5 19 12 19 12 19s7 0 8.9-.4a3 3 0 0 0 2.1-2.1A31 31 0 0 0 23.4 12 31 31 0 0 0 23 7.5z'/><path fill='#fff' d='M9.8 15.3V8.7l5.7 3.3z'/></svg>
+                      )],
+                      ['facebook', 'Facebook', (
+                        <svg viewBox='0 0 24 24' width='20' height='20'><path fill='#1877F2' d='M24 12a12 12 0 1 0-13.9 11.9v-8.4H7v-3.5h3.1V9.4c0-3 1.8-4.7 4.5-4.7 1.3 0 2.7.2 2.7.2v3h-1.5c-1.5 0-2 .9-2 1.9v2.2h3.4l-.5 3.5h-2.9v8.4A12 12 0 0 0 24 12z'/></svg>
+                      )],
+                      ['x', 'X (Twitter)', (
+                        <svg viewBox='0 0 24 24' width='17' height='17'><path fill='#fff' d='M18.9 1.2h3.7l-8 9.1L24 22.8h-7.4l-5.8-7.6-6.6 7.6H.5l8.6-9.8L0 1.2h7.6l5.2 6.9zM17.6 20.6h2L6.5 3.3H4.3z'/></svg>
+                      )],
+                      ['luxmedia', 'Lux Media', (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img src='/luxmedia.jpg' alt='Lux Media' width='20' height='20' className='rounded-sm object-cover' />
+                      )],
+                    ] as const).map(([key, label, logo]) => (
+                      <div key={key} className='border border-[#00ff41]/15 bg-[#00ff41]/3 p-2 flex flex-col gap-1.5'>
+                        <div className='flex items-center gap-3'>
+                          <span className='shrink-0 w-5 h-5 flex items-center justify-center'>{logo}</span>
+                          <span className='flex-1 text-[11px] text-[#00ff41]/80 font-bold'>{label}</span>
+                          <input
+                            type='checkbox'
+                            checked={restream[key]}
+                            onChange={e => saveRestream(key, e.target.checked)}
+                            className='w-4 h-4 accent-[#00ff41] cursor-pointer'
+                          />
+                        </div>
+                        <input
+                          value={keyForm[key]?.url ?? ''}
+                          onChange={e => setKeyForm(prev => ({ ...prev, [key]: { ...prev[key], url: e.target.value } }))}
+                          placeholder='Serveur RTMP (rtmp://...)'
+                          className='bg-black border border-[#00ff41]/25 text-[#00ff41] text-[10px] px-2 py-1 outline-none focus:border-[#00ff41]/60 placeholder:text-[#00ff41]/25'
+                        />
+                        <input
+                          type='password'
+                          value={keyForm[key]?.key ?? ''}
+                          onChange={e => setKeyForm(prev => ({ ...prev, [key]: { ...prev[key], key: e.target.value } }))}
+                          placeholder={restreamKeys?.[key]?.keySet ? `Clé enregistrée (${restreamKeys?.[key]?.keyHint ?? ''}) — vide = garder` : 'Clé de stream'}
+                          className='bg-black border border-[#00ff41]/25 text-[#00ff41] text-[10px] px-2 py-1 outline-none focus:border-[#00ff41]/60 placeholder:text-[#00ff41]/25'
+                        />
+                      </div>
+                    ))}
+                    <button
+                      onClick={async () => { setKeysSaving(true); await saveRestreamKeys(keyForm); setKeysSaving(false) }}
+                      disabled={keysSaving}
+                      className='w-full py-1.5 text-[9px] tracking-widest border border-[#00ff41]/50 text-[#00ff41]/70 hover:text-[#00ff41] hover:bg-[#00ff41]/10 transition-all disabled:opacity-40'
+                    >{keysSaving ? '…' : '✓ SAUVEGARDER LES CLÉS'}</button>
+                    <p className='text-[9px] text-[#00ff41]/30 leading-relaxed px-1'>Checkbox = restream ON/OFF. Clés stockées côté serveur (jamais dans la base publique). Champ clé vide = on garde l'existante.</p>
+                  </div>
+                )}
+
                 {/* SONDAGE */}
                 {menuSection === 'sondage' && (
                   <div className='px-2 py-2 flex flex-col gap-3'>
@@ -765,25 +851,37 @@ Sous-titre (ligne 2)'
 
                 {/* PROGRAMME */}
                 {menuSection === 'programme' && (
-                  <div className='px-3 py-4 space-y-4'>
-                    <div className='text-[9px] text-[#00ff41]/35 tracking-widest'>PROCHAINE SESSION</div>
-                    <div>
-                      <label className='text-[9px] text-[#00ff41]/40 tracking-widest block mb-1.5'>DATE ET HEURE</label>
-                      <input type='datetime-local' value={scheduleDate} onChange={e => setScheduleDate(e.target.value)}
-                        className='w-full bg-transparent border border-[#00ff41]/30 px-2 py-1.5 text-[11px] text-[#00ff41] outline-none focus:border-[#00ff41]/60 [color-scheme:dark]' />
+                  <div className='px-3 py-4 space-y-3'>
+                    <div className='text-[9px] text-[#00ff41]/35 tracking-widest'>PROGRAMME (texte + format par ligne)</div>
+                    <div className='flex flex-col gap-1.5'>
+                      {scheduleLines.map((line, i) => (
+                        <div key={i} className='flex items-center gap-1.5'>
+                          <input value={line.text}
+                            onChange={e => setScheduleLines(prev => prev.map((l, j) => j === i ? { ...l, text: e.target.value } : l))}
+                            placeholder={`Ligne ${i + 1}`}
+                            className='flex-1 min-w-0 bg-transparent border border-[#00ff41]/30 px-2 py-1.5 text-[11px] text-[#00ff41] placeholder-[#00ff41]/20 outline-none focus:border-[#00ff41]/60' />
+                          <select value={line.format}
+                            onChange={e => setScheduleLines(prev => prev.map((l, j) => j === i ? { ...l, format: e.target.value } : l))}
+                            className='bg-black border border-[#00ff41]/30 text-[#00ff41] text-[10px] px-1 py-1.5 outline-none focus:border-[#00ff41]/60 [color-scheme:dark] shrink-0'>
+                            <option value='titre'>Titre</option>
+                            <option value='soustitre'>Sous-titre</option>
+                            <option value='paragraphe'>Paragraphe</option>
+                          </select>
+                          <button onClick={() => setScheduleLines(prev => prev.length > 1 ? prev.filter((_, j) => j !== i) : [{ text: '', format: 'titre' }])}
+                            className='text-[#ff4141]/50 hover:text-[#ff4141] text-[12px] px-1 shrink-0'>✕</button>
+                        </div>
+                      ))}
                     </div>
-                    <div>
-                      <label className='text-[9px] text-[#00ff41]/40 tracking-widest block mb-1.5'>TITRE (optionnel)</label>
-                      <input value={scheduleTitle} onChange={e => setScheduleTitle(e.target.value)}
-                        placeholder='Sujet de la session...'
-                        className='w-full bg-transparent border border-[#00ff41]/30 px-2 py-1.5 text-[11px] text-[#00ff41] placeholder-[#00ff41]/20 outline-none focus:border-[#00ff41]/60' />
-                    </div>
-                    <button onClick={() => saveSchedule(scheduleDate, scheduleTitle)}
+                    <button onClick={() => setScheduleLines(prev => [...prev, { text: '', format: 'paragraphe' }])}
+                      className='w-full py-1.5 text-[9px] tracking-widest border border-[#00ff41]/30 text-[#00ff41]/55 hover:text-[#00ff41] hover:bg-[#00ff41]/8 transition-all'>
+                      + AJOUTER UNE LIGNE
+                    </button>
+                    <button onClick={() => saveSchedule(scheduleLines.filter(l => l.text.trim()))}
                       className='w-full py-2 text-[10px] bg-[#00ff41]/10 border border-[#00ff41]/40 text-[#00ff41]/80 hover:text-[#00ff41] hover:bg-[#00ff41]/20 transition-all tracking-widest'>
                       ✓ ENREGISTRER
                     </button>
-                    {scheduleDate && (
-                      <button onClick={() => { saveSchedule('', ''); setScheduleDate(''); setScheduleTitle('') }}
+                    {scheduleLines.some(l => l.text.trim()) && (
+                      <button onClick={() => { saveSchedule([]); setScheduleLines([{ text: '', format: 'titre' }]) }}
                         className='w-full py-1.5 text-[9px] text-[#ff4141]/40 hover:text-[#ff4141] transition-colors tracking-widest'>
                         Retirer le programme
                       </button>
@@ -838,17 +936,17 @@ Sous-titre (ligne 2)'
                       <span className='text-[#00ff41]/25 text-[12px]'>›</span>
                     </button>
                     <button
-                      onClick={() => setMenuSection('pip')}
-                      className='w-full mb-2 py-1.5 text-[9px] border border-[#00ff41]/30 text-[#00ff41]/55 hover:bg-[#00ff41]/8 hover:text-[#00ff41] transition-all tracking-widest flex items-center justify-between px-2'
-                    >
-                      <span>🎥 PIP</span>
-                      <span className='text-[#00ff41]/25 text-[12px]'>›</span>
-                    </button>
-                    <button
                       onClick={() => setMenuSection('annonces')}
                       className='w-full mb-2 py-1.5 text-[9px] border border-[#00ff41]/30 text-[#00ff41]/55 hover:bg-[#00ff41]/8 hover:text-[#00ff41] transition-all tracking-widest flex items-center justify-between px-2'
                     >
                       <span>📢 ANNONCES / PUB</span>
+                      <span className='text-[#00ff41]/25 text-[12px]'>›</span>
+                    </button>
+                    <button
+                      onClick={() => { setMenuSection('restream'); loadRestreamKeys() }}
+                      className='w-full mb-2 py-1.5 text-[9px] border border-[#00ff41]/30 text-[#00ff41]/55 hover:bg-[#00ff41]/8 hover:text-[#00ff41] transition-all tracking-widest flex items-center justify-between px-2'
+                    >
+                      <span>📡 RESTREAM</span>
                       <span className='text-[#00ff41]/25 text-[12px]'>›</span>
                     </button>
                     <button
